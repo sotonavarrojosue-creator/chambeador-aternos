@@ -20,7 +20,32 @@ const CONFIG = {
   auth: 'offline',          // server cracked (sin premium/login)
   version: '1.21.11',       // última soportada por mineflayer (ViaVersion traduce)
   antiAfkIntervalo: 25000,  // ms entre "actividades"
+  watchdogIntervalo: 20000, // ms entre chequeos de conexión real
 };
+
+let bot = null;
+let esperandoServerOffline = false;
+let ultimoSpawn = 0;
+let antiAfkTimer = null;
+let watchdogTimer = null;
+let reconectando = false;
+
+// ---- Estado real de la conexión ----
+function conexionViva() {
+  if (!bot) return false;
+  try {
+    // 1) debe haber entidad (spawn ocurrió)
+    if (!bot.entity) return false;
+    // 2) el socket TCP no debe estar destruido
+    const socket = bot._client && bot._client.socket;
+    if (socket && socket.destroyed) return false;
+    // 3) no debe haber estado de cierre
+    if (bot._client && bot._client.state === 'closed') return false;
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
 
 // ---- Servidor HTTP: requerido por Render y para keep-alive (UptimeRobot) ----
 const server = http.createServer((req, res) => {
@@ -28,7 +53,8 @@ const server = http.createServer((req, res) => {
   res.end(JSON.stringify({
     status: 'ok',
     bot: CONFIG.username,
-    conectado: !!(bot && bot.entity),
+    conectado: conexionViva(),
+    spawnHace: ultimoSpawn ? Math.round((Date.now() - ultimoSpawn) / 1000) + 's' : 'nunca',
     server: `${CONFIG.host}:${CONFIG.port}`,
   }));
 });
@@ -37,10 +63,8 @@ server.listen(HTTP_PORT, () => {
   console.log(`[${hora()}] HTTP keep-alive en puerto ${HTTP_PORT}`);
 });
 
-let bot = null;
-let esperandoServerOffline = false;
-
 function crearBot() {
+  if (reconectando) return;
   console.log(`[${hora()}] Conectando como ${CONFIG.username} a ${CONFIG.host}:${CONFIG.port}...`);
 
   bot = mineflayer.createBot({
@@ -53,15 +77,18 @@ function crearBot() {
 
   bot.on('login', () => console.log(`[${hora()}] Login OK`));
   bot.on('spawn', () => {
-    console.log(`[${hora()}] ✅ En el server. Bot activo (${bot.entity.position.x.toFixed(1)}, ${bot.entity.position.y.toFixed(1)}, ${bot.entity.position.z.toFixed(1)})`);
+    ultimoSpawn = Date.now();
     esperandoServerOffline = false;
+    console.log(`[${hora()}] ✅ En el server. Bot activo (${bot.entity.position.x.toFixed(1)}, ${bot.entity.position.y.toFixed(1)}, ${bot.entity.position.z.toFixed(1)})`);
     arrancarAntiAfk();
+    arrancarWatchdog();
   });
 
   // ---- Anti-AFK: comportamiento humano aleatorio ----
   function arrancarAntiAfk() {
-    setInterval(async () => {
-      if (!bot || !bot.entity) return;
+    if (antiAfkTimer) clearInterval(antiAfkTimer);
+    antiAfkTimer = setInterval(() => {
+      if (!conexionViva()) return;
       try {
         // 1) saltar
         bot.setControlState('jump', true);
@@ -86,6 +113,17 @@ function crearBot() {
     }, CONFIG.antiAfkIntervalo);
   }
 
+  // ---- Watchdog: detecta conexiones muertas silenciosamente ----
+  function arrancarWatchdog() {
+    if (watchdogTimer) clearInterval(watchdogTimer);
+    watchdogTimer = setInterval(() => {
+      if (!conexionViva()) {
+        console.log(`[${hora()}] ⚠️ Watchdog: conexión muerta detectada (entity=${!!bot.entity}, socket=${bot._client && bot._client.socket ? !bot._client.socket.destroyed : 'n/a'})`);
+        reconectar();
+      }
+    }, CONFIG.watchdogIntervalo);
+  }
+
   // ---- Eventos de desconexión ----
   bot.on('kicked', (reason) => {
     console.log(`[${hora()}] ⚠️ Kickeado: ${reason}`);
@@ -98,17 +136,30 @@ function crearBot() {
   bot.on('error', (err) => {
     console.log(`[${hora()}] ⚠️ Error: ${err.message}`);
     // "ECONNREFUSED" = server apagado (típico de Aternos)
-    if (err.code === 'ECONNREFUSED') esperandoServerOffline = true;
+    if (err.code === 'ECONNREFUSED' || err.code === 'ECONNRESET') esperandoServerOffline = true;
   });
 }
 
 function reconectar() {
+  if (reconectando) return;
+  reconectando = true;
+
+  // limpiar timers
+  if (antiAfkTimer) { clearInterval(antiAfkTimer); antiAfkTimer = null; }
+  if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; }
+
   // cerrar bot viejo si sigue vivo
-  if (bot) { try { bot.removeAllListeners(); bot.end(); } catch (e) {} bot = null; }
+  if (bot) {
+    try { bot.removeAllListeners(); bot.end(); } catch (e) {}
+    bot = null;
+  }
 
   const delay = esperandoServerOffline ? 60000 : 5000;
-  console.log(`[${hora()}] Reintentando en ${delay / 1000}s...${esperandoServerOffline ? ' (server apagado — enciéndelo en el panel de Aternos)' : ''}`);
-  setTimeout(crearBot, delay);
+  console.log(`[${hora()}] Reintentando en ${delay / 1000}s...${esperandoServerOffline ? ' (server apagado — Aternos lo enciende al conectar)' : ''}`);
+  setTimeout(() => {
+    reconectando = false;
+    crearBot();
+  }, delay);
 }
 
 function hora() {
