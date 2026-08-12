@@ -261,7 +261,7 @@ function crearBot() {
   // ---- Selección estilo WorldEdit: bloque que el jugador está mirando ----
   function bloqueQueMira(username) {
     const jugador = bot.players[username] && bot.players[username].entity;
-    if (!jugador) return { ok: false, razon: `No te veo (${username}), acércate al bot o usa !donde` };
+    if (!jugador) return { ok: false, retryable: true, razon: `No te detecto (${username})` };
     try {
       const pos = jugador.position;
       if (!pos || !Number.isFinite(pos.x) || !Number.isFinite(pos.y) || !Number.isFinite(pos.z)) {
@@ -294,10 +294,21 @@ function crearBot() {
     }
   }
 
-  function marcarPos(n, username) {
-    const res = bloqueQueMira(username);
-    if (!res.ok) {
-      bot.chat(res.razon);
+  async function marcarPos(n, username) {
+    // la entidad del jugador puede tardar en spawnear (teleport, cambio de
+    // mundo, reconexión) — reintentar hasta 3 veces con 1.5s de espera
+    let res = null;
+    for (let i = 0; i < 3; i++) {
+      res = bloqueQueMira(username);
+      if (res.ok) break;
+      if (!res.retryable) break;
+      await new Promise(r => setTimeout(r, 1500));
+    }
+    if (!res || !res.ok) {
+      const p = bot.entity ? bot.entity.position : null;
+      bot.chat(p
+        ? `${res ? res.razon : 'No te detecto'}. Estoy en ${Math.floor(p.x)} ${Math.floor(p.y)} ${Math.floor(p.z)} (¿mismo mundo?)`
+        : 'No te detecto');
       return;
     }
     seleccion[n === 1 ? 'pos1' : 'pos2'] = res.pos;
