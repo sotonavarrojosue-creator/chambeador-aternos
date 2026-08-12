@@ -259,11 +259,22 @@ function crearBot() {
     const jugador = bot.players[username] && bot.players[username].entity;
     if (!jugador) return { ok: false, razon: `No te veo (${username}), acércate al bot o usa !donde` };
     try {
-      const ojo = jugador.position.offset(0, 1.62, 0); // altura de los ojos
-      const dir = jugador.lookVector; // dirección de mirada normalizada
+      const pos = jugador.position;
+      if (!pos || !Number.isFinite(pos.x) || !Number.isFinite(pos.y) || !Number.isFinite(pos.z)) {
+        return { ok: false, razon: 'Tu posición aún no está cargada' };
+      }
+      const ojo = pos.offset(0, 1.62, 0); // altura de los ojos
+      // dirección de mirada calculada manualmente (lookVector del getter falla en este server)
+      const dir = new Vec3(
+        -Math.sin(jugador.yaw) * Math.cos(jugador.pitch),
+        -Math.sin(jugador.pitch),
+        -Math.cos(jugador.yaw) * Math.cos(jugador.pitch)
+      );
       const hit = bot.world.raycast(ojo, dir, 64, (block) => block && !NO_MINABLES.has(block.name));
-      return hit ? { ok: true, pos: hit.position } : { ok: false, razon: 'No veo ningún bloque que estés mirando' };
+      if (!hit) return { ok: false, razon: 'No veo un bloque en tu línea de mira (apunta a un bloque cercano)' };
+      return { ok: true, pos: hit.position };
     } catch (e) {
+      console.log(`[${hora()}] ⚠️ Error raycast: ${e.message}`);
       return { ok: false, razon: 'Error calculando tu mirada' };
     }
   }
