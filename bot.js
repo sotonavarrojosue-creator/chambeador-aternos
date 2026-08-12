@@ -162,7 +162,7 @@ function crearBot() {
 
   function procesarComando(username, mensaje) {
     const nombreLimpio = limpiarNombre(username);
-    if (nombreLimpio === bot.username) return; // ignorar mensajes propios
+    if (!nombreLimpio || nombreLimpio === bot.username) return; // ignorar propios/vacíos
     // normalizar: acepta !pos1, /pos1 y //pos1 (WorldEdit style)
     const args = mensaje.trim().replace(/^\/+/, '').split(/\s+/);
     const cmd = args[0].toLowerCase();
@@ -211,18 +211,44 @@ function crearBot() {
   }
 
   function arrancarChat() {
-    // 'message' cubre TODOS los formatos de chat (a diferencia de 'chat',
-    // que solo se dispara con formato estándar chat.type.text). Usar solo
-    // 'message' evita comandos duplicados.
+    // El server manda el chat con formato custom (translate "%s" + campo
+    // "unsigned"): toString() devuelve SOLO el mensaje sin nombre, y el evento
+    // 'chat' de mineflayer NO se dispara. Por eso:
+    // 1) solo procesamos mensajes que empiezan con ! o /
+    // 2) el nombre del jugador se extrae del JSON "unsigned"
     bot.on('message', (jsonMsg) => {
       try {
         const texto = jsonMsg.toString();
-        // formato "<jugador> mensaje" (con prefijos opcionales antes)
-        const m = texto.match(/<(.+?)>\s*(.*)$/);
-        if (!m) return;
-        procesarComando(m[1], m[2]);
+        const trimmed = texto.trim();
+        if (!trimmed.startsWith('!') && !trimmed.startsWith('/')) return; // solo comandos
+        const nombre = extraerNombreMensaje(jsonMsg) || 'desconocido';
+        procesarComando(nombre, trimmed);
       } catch (e) { /* ignorar */ }
     });
+  }
+
+  // Extrae el nombre del jugador del JSON unsigned del mensaje
+  // ("[OWNER]TyllinROCK" → "TyllinROCK")
+  function extraerNombreMensaje(jsonMsg) {
+    try {
+      const u = jsonMsg.unsigned || jsonMsg;
+      const withs = (u.json && u.json.with) || [];
+      if (withs.length === 0) return null;
+      const primer = withs[0];
+      if (primer && primer.extra) {
+        const primerExtra = primer.extra[0];
+        if (primerExtra && primerExtra.extra) {
+          return limpiarNombre(primerExtra.extra.map(e => e.text || '').join(''));
+        }
+        if (primerExtra && primerExtra.text) {
+          return limpiarNombre(primerExtra.text);
+        }
+      }
+      if (primer && primer.text) {
+        return limpiarNombre(primer.text);
+      }
+    } catch (e) { /* ignorar */ }
+    return null;
   }
 
   // ---- Selección estilo WorldEdit: bloque que el jugador está mirando ----
