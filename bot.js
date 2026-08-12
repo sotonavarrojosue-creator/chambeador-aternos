@@ -268,15 +268,26 @@ function crearBot() {
         return { ok: false, razon: 'Tu posición aún no está cargada' };
       }
       const ojo = pos.offset(0, 1.62, 0); // altura de los ojos
-      // dirección de mirada calculada manualmente (lookVector del getter falla en este server)
-      const dir = new Vec3(
-        -Math.sin(jugador.yaw) * Math.cos(jugador.pitch),
-        -Math.sin(jugador.pitch),
-        -Math.cos(jugador.yaw) * Math.cos(jugador.pitch)
-      );
-      const hit = bot.world.raycast(ojo, dir, 64, (block) => block && !NO_MINABLES.has(block.name));
-      if (!hit) return { ok: false, razon: 'No veo un bloque en tu línea de mira (apunta a un bloque cercano)' };
-      return { ok: true, pos: hit.position };
+      // 3 rayos: el server redondea la rotación del jugador (visto en vivo:
+      // pitch cuantizado a π/128), así que el rayo único puede caer en el
+      // bloque de arriba. Disparamos central + ±0.08 rad y elegimos el
+      // bloque MÁS CERCANO al jugador = el que realmente está mirando.
+      let mejorHit = null;
+      let mejorDist = Infinity;
+      for (const off of [0, -0.08, 0.08]) {
+        const dir = new Vec3(
+          -Math.sin(jugador.yaw) * Math.cos(jugador.pitch + off),
+          -Math.sin(jugador.pitch + off),
+          -Math.cos(jugador.yaw) * Math.cos(jugador.pitch + off)
+        );
+        const hit = bot.world.raycast(ojo, dir, 64, (block) => block && !NO_MINABLES.has(block.name));
+        if (hit) {
+          const dist = hit.position.distanceTo(pos);
+          if (dist < mejorDist) { mejorDist = dist; mejorHit = hit; }
+        }
+      }
+      if (!mejorHit) return { ok: false, razon: 'No veo un bloque en tu línea de mira (apunta a un bloque cercano)' };
+      return { ok: true, pos: mejorHit.position };
     } catch (e) {
       console.log(`[${hora()}] ⚠️ Error raycast: ${e.message}`);
       return { ok: false, razon: 'Error calculando tu mirada' };
@@ -332,7 +343,7 @@ function crearBot() {
   // ---- Gestión de inventario: si está casi lleno, dropear basura ----
   function gestionarInventario() {
     if (!bot.inventory) return;
-    const slots = bot.inventory.slots();
+    const slots = bot.inventory.slots; // array en mineflayer 4.x (NO es función)
     const vacios = slots.filter(s => !s).length;
     if (vacios < 5) {
       for (const slot of slots) {
