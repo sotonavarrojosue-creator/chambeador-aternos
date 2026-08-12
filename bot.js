@@ -201,34 +201,108 @@ function crearBot() {
     reanudarAntiAfk();
   }
 
-  // Mina TODOS los bloques sólidos dentro de un cubo
+  // Mina TODO el volumen entre dos esquinas (estilo WorldEdit):
+  // genera todas las posiciones del cubo y va picando capa por capa.
   async function minarArea(x1, y1, z1, x2, y2, z2) {
     if (!conexionViva()) return;
     if (minando) { bot.chat('Ya estoy minando, usa !stop primero'); return; }
+
+    const [minX, maxX] = [Math.min(x1, x2), Math.max(x1, x2)];
+    const [minY, maxY] = [Math.min(y1, y2), Math.max(y1, y2)];
+    const [minZ, maxZ] = [Math.min(z1, z2), Math.max(z1, z2)];
+    const volumen = (maxX - minX + 1) * (maxY - minY + 1) * (maxZ - minZ + 1);
+    if (volumen > 200000) {
+      bot.chat(`Área demasiado grande (${volumen} bloques). Máximo 200.000`);
+      return;
+    }
+
     minando = true;
     pausarAntiAfk();
     vigilarVida();
-    bot.chat(`Minando área ${x1},${y1},${z1} → ${x2},${y2},${z2}`);
+    bot.chat(`Minando cubo ${minX},${minY},${minZ} → ${maxX},${maxY},${maxZ} (${volumen} bloques de volumen)`);
+
     try {
-      const area = {
-        x: [Math.min(x1, x2), Math.max(x1, x2)],
-        y: [Math.min(y1, y2), Math.max(y1, y2)],
-        z: [Math.min(z1, z2), Math.max(z1, z2)],
-      };
-      // bloques sólidos dentro del área (excluye aire, agua, lava, bedrock)
-      const bloques = bot.findBlocks({
-        matching: (b) => b && b.name !== 'air' && b.name !== 'water' && b.name !== 'lava' && b.name !== 'bedrock',
-        area,
-        maxDistance: 256,
-        count: 10000,
-      }).map(pos => bot.blockAt(pos));
+      // ir al centro del cubo para forzar la carga de chunks
+      const centro = new Vec3((minX + maxX) >> 1, (minY + maxY) >> 1, (minZ + maxZ) >> 1);
+      await bot.pathfinder.goto(new goals.GoalBlock(centro.x, centro.y, centro.z));
+      await new Promise(r => setTimeout(r, 3000)); // esperar a que carguen los chunks
+
+      // generar TODAS las posiciones del cubo, capa por capa.
+      // IMPORTANTE: Y de ARRIBA hacia ABAJO — si se mina de abajo hacia arriba,
+      // el bloque de encima cae sobre el bot y lo deja atrapado.
+      const posiciones = [];
+      for (let y = maxY; y >= minY; y--) {
+        for (let z = minZ; z <= maxZ; z++) {
+          for (let x = minX; x <= maxX; x++) {
+            posiciones.push(new Vec3(x, y, z));
+          }
+        }
+      }
+
+      // filtrar solo bloques reales (aire, agua, lava y bedrock no se minan)
+      const bloques = [];
+      for (const pos of posiciones) {
+        const b = bot.blockAt(pos);
+        if (b && !['air', 'cave_air', 'void_air', 'water', 'lava', 'bedrock'].includes(b.name)) {
+          bloques.push(b);
+        }
+      }
+
       if (bloques.length === 0) {
         bot.chat('No hay bloques minables en esa área');
         minando = false; reanudarAntiAfk(); return;
       }
-      bot.chat(`Encontré ${bloques.length} bloques, empiezo...`);
-      await bot.collectBlock.collect(bloques);
-      bot.chat('Área minada. Listo!');
+
+      bot.chat(`Encontré ${bloques.length} bloques minables. Picando...`);
+      // por cada bloque: si está al alcance, dig directo (sin pathfinder, evita
+      // el bug "Took to long to decide path"); si está lejos, acercarse y dig.
+      // Si uno falla, sigue con el siguiente.
+      const ALCANCE = 4.5; // distancia de dig en Minecraft
+      let minados = 0;
+      for (let i = 0; i < bloques.length && minando && conexionViva(); i++) {
+        const block = bloques[i];
+        try {
+          const dist = bot.entity.position.distanceTo(block.position);
+          if (dist > ALCANCE) {
+            try {
+              await bot.pathfinder.goto(new goals.GoalNear(block.position.x, block.position.y, block.position.z, 3));
+            } catch (e) {
+              // si no puede calcular ruta, intentar dig directo igualmente
+            }
+          }
+          // dig con reintentos (el bot puede moverse/caer durante el dig → "Digging aborted")
+          let exito = false;
+          for (let intento = 0; intento < 3 && !exito; intento++) {
+            try {
+              await bot.dig(block);
+              exito = true;
+            } catch (e) {
+              await new Promise(r => setTimeout(r, 500));
+            }
+          }
+          if (!exito) throw new Error('dig falló 3 veces');
+          minados++;
+          // si quedó atrapado (bloque cayó encima), saltar para liberarse
+          const bloqueEnMi = bot.blockAt(bot.entity.position);
+          if (bloqueEnMi && bloqueEnMi.name !== 'air') {
+            bot.setControlState('jump', true);
+            await new Promise(r => setTimeout(r, 600));
+            bot.setControlState('jump', false);
+          }
+        } catch (e) {
+          console.log(`[${hora()}] Bloque ${i} falló: ${e.message.slice(0, 50)}`);
+        }
+        // recoger drops acumulados cada 10 bloques
+        if (minados > 0 && minados % 10 === 0) {
+          try { await bot.collectBlock.collectNearby(8); } catch (e) {}
+          bot.chat(`Progreso: ${minados}/${bloques.length} bloques minados`);
+        }
+      }
+      // recoger drops restantes al terminar
+      try { await bot.collectBlock.collectNearby(16); } catch (e) {}
+
+      if (minando) bot.chat(`Área minada: ${minados}/${bloques.length} bloques. Listo!`);
+      else bot.chat(`Detenido con ${minados}/${bloques.length} bloques minados`);
     } catch (e) {
       bot.chat(`Minado interrumpido: ${(e.message || e).slice(0, 60)}`);
     }
