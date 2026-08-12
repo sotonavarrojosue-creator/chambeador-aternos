@@ -877,7 +877,7 @@ function crearBot() {
           console.log(`[${hora()}] Bloque ${i} falló: ${e.message.slice(0, 50)}`);
         }
         // recoger drops acumulados y gestionar inventario cada 10 bloques
-        if (minados > 0 && minados % 10 === 0) {
+        if (minados > 0 && minados % 500 === 0) {
           try { await recogerDropsCercanos(8); } catch (e) {}
           gestionarInventario();
           bot.chat(`Progreso: ${minados}/${orden.length} bloques minados`);
