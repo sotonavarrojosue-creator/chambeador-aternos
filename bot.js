@@ -192,6 +192,10 @@ function crearBot() {
       volverAlSpawn();
       } else if (cmd === '!inventario') {
         listarInventario();
+      } else if (cmd === '!pico') {
+        damePico(args[1]);
+      } else if (cmd === '!recoge') {
+        recogerTodo();
       } else if (cmd === '!donde') {
         const p = bot.entity ? bot.entity.position : null;
         bot.chat(p ? `Estoy en ${Math.floor(p.x)} ${Math.floor(p.y)} ${Math.floor(p.z)} (mírame y usa !ven)` : 'No tengo posición');
@@ -496,6 +500,39 @@ function crearBot() {
     if (!conexionViva()) return;
     const items = bot.inventory.items().map(i => `${i.name}x${i.count}`).join(', ');
     bot.chat(`Inventario: ${items || 'vacío'}`);
+  }
+
+  // ---- Darse un pico a sí mismo (!pico [tipo]) — el bot es OP ----
+  const PICOS = {
+    diamante: 'diamond_pickaxe',
+    hierro: 'iron_pickaxe',
+    piedra: 'stone_pickaxe',
+    madera: 'wooden_pickaxe',
+  };
+  function damePico(tipo) {
+    if (!conexionViva()) return;
+    const pico = PICOS[(tipo || 'hierro').toLowerCase()] || PICOS.hierro;
+    bot.chat(`Intentando conseguir ${pico}...`);
+    bot.chat(`/give ${bot.username} ${pico} 1`);
+    // verificar si lo recibió
+    setTimeout(() => {
+      const loTiene = bot.inventory.items().some(i => i.name === pico);
+      if (loTiene) {
+        bot.chat(`✅ Tengo ${pico}. Ya lo equipo solo al minar`);
+        // equiparlo ya
+        try { bot.equip(bot.inventory.items().find(i => i.name === pico), 'hand'); } catch (e) {}
+      } else {
+        bot.chat('No me llegó el pico (¿tengo permisos de OP?). Si no, tíramelo y usa !recoge');
+      }
+    }, 2500);
+  }
+
+  // ---- Recoger todos los drops cercanos (!recoge) ----
+  async function recogerTodo() {
+    if (!conexionViva()) return;
+    bot.chat('Recogiendo items cercanos...');
+    await recogerDropsCercanos(32);
+    bot.chat('Listo.');
   }
 
   // ---- Mina TODO el volumen entre dos esquinas (estilo WorldEdit):
