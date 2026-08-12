@@ -268,26 +268,21 @@ function crearBot() {
         return { ok: false, razon: 'Tu posición aún no está cargada' };
       }
       const ojo = pos.offset(0, 1.62, 0); // altura de los ojos
-      // 3 rayos: el server redondea la rotación del jugador (visto en vivo:
-      // pitch cuantizado a π/128), así que el rayo único puede caer en el
-      // bloque de arriba. Disparamos central + ±0.08 rad y elegimos el
-      // bloque MÁS CERCANO al jugador = el que realmente está mirando.
-      let mejorHit = null;
-      let mejorDist = Infinity;
-      for (const off of [0, -0.08, 0.08]) {
+      // El server redondea la rotación del jugador (pitch cuantizado a π/128).
+      // Al mirar un bloque a nivel de los pies, el rayo exacto pasa POR ENCIMA
+      // y se va al horizonte. Barrido: rayo exacto primero, luego desviaciones
+      // hacia abajo (caso típico), luego hacia arriba. Primer hit gana.
+      const desviaciones = [0, -0.05, -0.1, -0.15, 0.05, 0.1, 0.15];
+      for (const off of desviaciones) {
         const dir = new Vec3(
           -Math.sin(jugador.yaw) * Math.cos(jugador.pitch + off),
           -Math.sin(jugador.pitch + off),
           -Math.cos(jugador.yaw) * Math.cos(jugador.pitch + off)
         );
         const hit = bot.world.raycast(ojo, dir, 64, (block) => block && !NO_MINABLES.has(block.name));
-        if (hit) {
-          const dist = hit.position.distanceTo(pos);
-          if (dist < mejorDist) { mejorDist = dist; mejorHit = hit; }
-        }
+        if (hit) return { ok: true, pos: hit.position };
       }
-      if (!mejorHit) return { ok: false, razon: 'No veo un bloque en tu línea de mira (apunta a un bloque cercano)' };
-      return { ok: true, pos: mejorHit.position };
+      return { ok: false, retryable: false, razon: 'No veo un bloque en tu línea de mira (apunta a un bloque cercano)' };
     } catch (e) {
       console.log(`[${hora()}] ⚠️ Error raycast: ${e.message}`);
       return { ok: false, razon: 'Error calculando tu mirada' };
