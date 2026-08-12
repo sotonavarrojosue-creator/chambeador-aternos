@@ -282,7 +282,7 @@ function crearBot() {
         const hit = bot.world.raycast(ojo, dir, 64, (block) => block && !NO_MINABLES.has(block.name));
         if (hit) return { ok: true, pos: hit.position };
       }
-      return { ok: false, retryable: false, razon: 'No veo un bloque en tu línea de mira (apunta a un bloque cercano)' };
+      return { ok: false, retryable: true, razon: 'No veo un bloque en tu línea de mira' };
     } catch (e) {
       console.log(`[${hora()}] ⚠️ Error raycast: ${e.message}`);
       return { ok: false, razon: 'Error calculando tu mirada' };
@@ -291,7 +291,8 @@ function crearBot() {
 
   async function marcarPos(n, username) {
     // la entidad del jugador puede tardar en spawnear (teleport, cambio de
-    // mundo, reconexión) — reintentar hasta 3 veces con 1.5s de espera
+    // mundo, reconexión) y el server NO reenvía la rotación si el jugador
+    // está quieto — reintentar hasta 3 veces con 1.5s de espera
     let res = null;
     for (let i = 0; i < 3; i++) {
       res = bloqueQueMira(username);
@@ -302,7 +303,7 @@ function crearBot() {
     if (!res || !res.ok) {
       const p = bot.entity ? bot.entity.position : null;
       bot.chat(p
-        ? `${res ? res.razon : 'No te detecto'}. Estoy en ${Math.floor(p.x)} ${Math.floor(p.y)} ${Math.floor(p.z)} (¿mismo mundo?)`
+        ? `${res ? res.razon : 'No te detecto'}. Muévete un paso y reintenta (el server no me envía tu mirada si estás quieto). Estoy en ${Math.floor(p.x)} ${Math.floor(p.y)} ${Math.floor(p.z)}`
         : 'No te detecto');
       return;
     }
