@@ -194,6 +194,8 @@ function crearBot() {
         listarInventario();
       } else if (cmd === '!pico') {
         damePico(args[1]);
+      } else if (cmd === '!tira' && args.length >= 2) {
+        tirarItem(args.slice(1).join(' '));
       } else if (cmd === '!recoge') {
         recogerTodo();
       } else if (cmd === '!donde') {
@@ -610,6 +612,27 @@ function crearBot() {
         bot.chat('No me llegó el pico (¿tengo permisos de OP?). Si no, tíramelo y usa !recoge');
       }
     }, 2500);
+  }
+
+  // ---- Tirar items del inventario (!tira <nombre>) ----
+  // Útil para que el bot use SOLO el pico que el jugador le dio: tira los
+  // picos auto-generados con /give y mineflayer-tool usará el que quede.
+  async function tirarItem(nombre) {
+    if (!conexionViva()) return;
+    const termino = nombre.toLowerCase().replace('pico', 'pickaxe');
+    const items = bot.inventory.items().filter(i => i.name.includes(termino));
+    if (items.length === 0) {
+      bot.chat(`No tengo "${nombre}" en el inventario. Tengo: ${bot.inventory.items().map(i => i.name).join(', ') || 'nada'}`);
+      return;
+    }
+    let tirados = 0;
+    for (const item of items) {
+      try {
+        await bot.tossStack(item);
+        tirados += item.count;
+      } catch (e) { /* seguir con el siguiente */ }
+    }
+    bot.chat(`Tiré ${tirados} ${items[0].name}${items.length > 1 ? ' (y otros que coincidían)' : ''}`);
   }
 
   // ---- Recoger todos los drops cercanos (!recoge) ----
