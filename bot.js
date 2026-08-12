@@ -45,6 +45,10 @@ let minarVigiaTimer = null; // vigila la vida mientras mina
 let siguiendoA = null;      // username al que el bot sigue (!ven)
 let seguirTimer = null;     // timer de seguimiento
 let seleccion = { pos1: null, pos2: null }; // selección estilo WorldEdit (!pos1 / !pos2)
+let atascoTimer = null;      // monitor de atascos del pathfinder
+let ultimaPosMovimiento = null;
+let intentosLiberacion = 0;
+let destinoMinado = null;    // centro del cubo actual (para tp de emergencia)
 
 // ---- Estado real de la conexión ----
 function conexionViva() {
@@ -113,6 +117,7 @@ function crearBot() {
       const movements = new Movements(bot, mcData);
       movements.canDig = false;
       movements.allow1by1towers = false;
+      movements.allowParkour = true; // saltar huecos de 1 sin quedarse pegado
       bot.pathfinder.setMovements(movements);
     } catch (e) {
       console.log(`[${hora()}] ⚠️ No se pudo configurar pathfinder: ${e.message}`);
@@ -120,6 +125,7 @@ function crearBot() {
     arrancarAntiAfk();
     arrancarWatchdog();
     arrancarChat();
+    arrancarMonitorAtascos();
   });
 
   // ---- Anti-AFK: comportamiento humano aleatorio ----
@@ -391,6 +397,52 @@ function crearBot() {
       return true;
     }
     return false;
+  }
+
+  // ---- Monitor de atascos: si el pathfinder intenta moverse pero el bot no
+  // avanza (típico al saltar contra un borde o en un hueco), intenta liberarse
+  // saltando Y avanzando a la vez; si persiste, se teletransporta (es OP). ----
+  function arrancarMonitorAtascos() {
+    if (atascoTimer) clearInterval(atascoTimer);
+    atascoTimer = setInterval(() => {
+      if (!conexionViva()) return;
+      try {
+        const p = bot.entity.position;
+        const moviendose = bot.pathfinder.isMoving() || bot.pathfinder.isPathing();
+        if (!moviendose) { ultimaPosMovimiento = null; intentosLiberacion = 0; return; }
+        if (!ultimaPosMovimiento) { ultimaPosMovimiento = p.clone(); return; }
+        const avanzado = p.distanceTo(ultimaPosMovimiento);
+        ultimaPosMovimiento = p.clone();
+        if (avanzado > 0.3) { intentosLiberacion = 0; return; } // avanzó bien
+
+        // estancado mientras intenta moverse → liberarse saltando + avanzando
+        intentosLiberacion++;
+        if (intentosLiberacion <= 3) {
+          bot.setControlState('jump', true);
+          bot.setControlState('forward', true);
+          setTimeout(() => {
+            bot.setControlState('jump', false);
+            bot.setControlState('forward', false);
+          }, 1200);
+          if (intentosLiberacion === 1) bot.chat('Estoy atascado, intento liberarme...');
+        } else {
+          // atascado persistente → teletransporte de emergencia a un lugar
+          // seguro cerca del cubo (o al spawn si no hay cubo)
+          intentosLiberacion = 0;
+          try { bot.pathfinder.stop(); } catch (e) {}
+          const lugar = destinoMinado
+            ? buscarLugarParado(destinoMinado.x, destinoMinado.y, destinoMinado.z)
+            : null;
+          if (lugar) {
+            bot.chat('No puedo avanzar, me teletransporto cerca del cubo...');
+            bot.chat(`/tp ${bot.username} ${lugar.x} ${lugar.y} ${lugar.z}`);
+          } else {
+            bot.chat('No puedo avanzar, me teletransporto al spawn...');
+            bot.chat(`/tp ${bot.username} ${bot.spawnPoint.x} ${bot.spawnPoint.y} ${bot.spawnPoint.z}`);
+          }
+        }
+      } catch (e) { /* no fatal */ }
+    }, 2000);
   }
 
   // ---- Vigilar vida/hambre/peligro mientras mina ----
@@ -694,6 +746,7 @@ function crearBot() {
       // ir CERCA del centro del cubo para forzar la carga de chunks
       // (GoalNear, no GoalBlock: si el cubo es sólido, el bot no puede entrar)
       const centro = new Vec3((minX + maxX) >> 1, (minY + maxY) >> 1, (minZ + maxZ) >> 1);
+      destinoMinado = centro; // para el tp de emergencia del monitor de atascos
       // si el cubo está lejos o muy por encima (ruta imposible: canDig=false,
       // sin torres), el bot es OP → se teletransporta a un lugar seguro cercano
       const distBot = bot.entity.position.distanceTo(centro);
@@ -804,6 +857,7 @@ function crearBot() {
       bot.chat(`Minado interrumpido: ${(e.message || e).slice(0, 60)}`);
     }
     minando = false;
+    destinoMinado = null;
     reanudarAntiAfk();
   }
 
