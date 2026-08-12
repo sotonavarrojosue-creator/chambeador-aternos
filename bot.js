@@ -134,6 +134,10 @@ function crearBot() {
     antiAfkTimer = setInterval(() => {
       if (!conexionViva() || minando || siguiendoA) return;
       try {
+        // No saltar ni mover aleatoriamente si el pathfinder está activo,
+        // para evitar interferir con el movimiento planificado.
+        const moviendose = bot.pathfinder.isMoving() || bot.pathfinder.isPathing();
+        if (moviendose) return; // ya hay un goal activo; el monitor de atascos saltará si es necesario
         // 1) saltar
         bot.setControlState('jump', true);
         setTimeout(() => bot.setControlState('jump', false), 400);
@@ -413,17 +417,19 @@ function crearBot() {
         if (!ultimaPosMovimiento) { ultimaPosMovimiento = p.clone(); return; }
         const avanzado = p.distanceTo(ultimaPosMovimiento);
         ultimaPosMovimiento = p.clone();
-        if (avanzado > 0.3) { intentosLiberacion = 0; return; } // avanzó bien
+        if (avanzado > 0.15) { intentosLiberacion = 0; return; } // avanzó bien (umbral más bajo)
 
         // estancado mientras intenta moverse → liberarse saltando + avanzando
         intentosLiberacion++;
         if (intentosLiberacion <= 3) {
+          // liberación progresiva: saltos cada vez más largos
+          const altura = 0.4 * intentosLiberacion; // 0.4, 0.8, 1.2 bloques
           bot.setControlState('jump', true);
           bot.setControlState('forward', true);
           setTimeout(() => {
             bot.setControlState('jump', false);
             bot.setControlState('forward', false);
-          }, 1200);
+          }, 800 + intentosLiberacion * 200); // cada vez un poco más largo
           if (intentosLiberacion === 1) bot.chat('Estoy atascado, intento liberarme...');
         } else {
           // atascado persistente → teletransporte de emergencia a un lugar
