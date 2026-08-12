@@ -206,7 +206,7 @@ function crearBot() {
           const [x, y, z] = args.slice(1, 4).map(Number);
           if ([x, y, z].every(v => Number.isFinite(v))) {
             seleccion[n === 1 ? 'pos1' : 'pos2'] = new Vec3(x, y, z);
-            bot.chat(`Pos${n} marcada: ${x} ${y} ${z} (coordenadas directas)`);
+            anunciarMarca(n, new Vec3(x, y, z), 'coordenadas directas');
           } else {
             bot.chat(`Uso: !pos${n} <x> <y> <z> — o apunta al bloque y escribe !pos${n}`);
           }
@@ -317,13 +317,21 @@ function crearBot() {
       return;
     }
     seleccion[n === 1 ? 'pos1' : 'pos2'] = res.pos;
-    bot.chat(`Pos${n} marcada: ${res.pos.x} ${res.pos.y} ${res.pos.z}`);
+    anunciarMarca(n, res.pos);
   }
 
   function mostrarSeleccion() {
     const p1 = seleccion.pos1, p2 = seleccion.pos2;
     if (!p1 && !p2) { bot.chat('Selección vacía. Usa !pos1 y !pos2 mirando los bloques'); return; }
     bot.chat(`Pos1: ${p1 ? `${p1.x} ${p1.y} ${p1.z}` : '—'} | Pos2: ${p2 ? `${p2.x} ${p2.y} ${p2.z}` : '—'}`);
+  }
+
+  // Anunciar una marca + recordar qué falta (pos1 o pos2) para que el usuario
+  // entienda que necesita DOS esquinas opuestas del volumen
+  function anunciarMarca(n, pos, modo) {
+    const otra = n === 1 ? 'pos2' : 'pos1';
+    const falta = seleccion[otra] ? '' : ` Ahora marca la esquina OPUESTA con !${otra} (ej: !${otra} x y z)`;
+    bot.chat(`Pos${n} marcada: ${pos.x} ${pos.y} ${pos.z}${modo ? ` (${modo})` : ''}.${falta}`);
   }
 
   function minarSeleccion() {
