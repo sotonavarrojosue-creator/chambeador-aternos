@@ -190,9 +190,12 @@ function crearBot() {
       seguirJugador(limpiarNombre(args[1]));
     } else if (cmd === '!vuelve') {
       volverAlSpawn();
-    } else if (cmd === '!inventario') {
-      listarInventario();
-    } else if (cmd === '!pos1') {
+      } else if (cmd === '!inventario') {
+        listarInventario();
+      } else if (cmd === '!donde') {
+        const p = bot.entity ? bot.entity.position : null;
+        bot.chat(p ? `Estoy en ${Math.floor(p.x)} ${Math.floor(p.y)} ${Math.floor(p.z)} (mírame y usa !ven)` : 'No tengo posición');
+      } else if (cmd === '!pos1') {
       marcarPos(1, nombreLimpio);
     } else if (cmd === '!pos2') {
       marcarPos(2, nombreLimpio);
@@ -254,25 +257,25 @@ function crearBot() {
   // ---- Selección estilo WorldEdit: bloque que el jugador está mirando ----
   function bloqueQueMira(username) {
     const jugador = bot.players[username] && bot.players[username].entity;
-    if (!jugador) return null;
+    if (!jugador) return { ok: false, razon: `No te veo (${username}), acércate al bot o usa !donde` };
     try {
       const ojo = jugador.position.offset(0, 1.62, 0); // altura de los ojos
       const dir = jugador.lookVector; // dirección de mirada normalizada
-      const hit = bot.world.raycast(ojo, dir, 8, (block) => block && !NO_MINABLES.has(block.name));
-      return hit ? hit.position : null;
+      const hit = bot.world.raycast(ojo, dir, 64, (block) => block && !NO_MINABLES.has(block.name));
+      return hit ? { ok: true, pos: hit.position } : { ok: false, razon: 'No veo ningún bloque que estés mirando' };
     } catch (e) {
-      return null;
+      return { ok: false, razon: 'Error calculando tu mirada' };
     }
   }
 
   function marcarPos(n, username) {
-    const pos = bloqueQueMira(username);
-    if (!pos) {
-      bot.chat(`No veo ningún bloque que estés mirando (${username})`);
+    const res = bloqueQueMira(username);
+    if (!res.ok) {
+      bot.chat(res.razon);
       return;
     }
-    seleccion[n === 1 ? 'pos1' : 'pos2'] = pos;
-    bot.chat(`Pos${n} marcada: ${pos.x} ${pos.y} ${pos.z}`);
+    seleccion[n === 1 ? 'pos1' : 'pos2'] = res.pos;
+    bot.chat(`Pos${n} marcada: ${res.pos.x} ${res.pos.y} ${res.pos.z}`);
   }
 
   function mostrarSeleccion() {
