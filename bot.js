@@ -290,20 +290,19 @@ function crearBot() {
   }
 
   async function marcarPos(n, username) {
-    // la entidad del jugador puede tardar en spawnear (teleport, cambio de
-    // mundo, reconexión) y el server NO reenvía la rotación si el jugador
-    // está quieto — reintentar hasta 3 veces con 1.5s de espera
+    // El server NO reenvía la rotación del jugador si está quieto (solo al
+    // moverse). Reintentar 5 veces × 2s para dar tiempo a que llegue.
     let res = null;
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 5; i++) {
       res = bloqueQueMira(username);
       if (res.ok) break;
       if (!res.retryable) break;
-      await new Promise(r => setTimeout(r, 1500));
+      await new Promise(r => setTimeout(r, 2000));
     }
     if (!res || !res.ok) {
       const p = bot.entity ? bot.entity.position : null;
       bot.chat(p
-        ? `${res ? res.razon : 'No te detecto'}. Muévete un paso y reintenta (el server no me envía tu mirada si estás quieto). Estoy en ${Math.floor(p.x)} ${Math.floor(p.y)} ${Math.floor(p.z)}`
+        ? `${res ? res.razon : 'No te detecto'}. Rota la cámara y DA UN PASO, luego reintenta (el server solo me envía tu mirada cuando te mueves). Estoy en ${Math.floor(p.x)} ${Math.floor(p.y)} ${Math.floor(p.z)}`
         : 'No te detecto');
       return;
     }
@@ -321,6 +320,13 @@ function crearBot() {
     const p1 = seleccion.pos1, p2 = seleccion.pos2;
     if (!p1 || !p2) {
       bot.chat('Necesitas marcar !pos1 y !pos2 primero');
+      return;
+    }
+    // Aviso si el cubo quedó plano (mismo plano X o Z) — el usuario marcó dos
+    // puntos de la misma pared en vez de esquinas opuestas
+    const planosIguales = (p1.x === p2.x) ? 'X' : (p1.z === p2.z) ? 'Z' : null;
+    if (planosIguales) {
+      bot.chat(`⚠ Las dos posiciones tienen el mismo ${planosIguales} → el cubo será de 1 bloque de ancho. Marca esquinas OPUESTAS del volumen (una abajo, la otra arriba en diagonal).`);
       return;
     }
     minarArea(p1.x, p1.y, p1.z, p2.x, p2.y, p2.z);
