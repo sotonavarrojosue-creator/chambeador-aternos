@@ -152,53 +152,76 @@ function crearBot() {
   }
 
   // ---- Comandos de chat: minería controlada por el usuario ----
-  function arrancarChat() {
-    bot.on('chat', (username, message) => {
-      if (username === bot.username) return; // ignorar mensajes propios
-      // normalizar: acepta !pos1, /pos1 y //pos1 (WorldEdit style)
-      const args = message.trim().replace(/^\/+/, '').split(/\s+/);
-      const cmd = args[0].toLowerCase();
+  // IMPORTANTE: el server formatea el chat de forma custom (plugin SuperLobby)
+  // con prefijos de grupo: "[Not Secure] <[OWNER] TyllinROCK> !pos1"
+  // Por eso el evento estándar 'chat' de mineflayer NO se dispara — usamos
+  // 'message' y parseamos <jugador> mensaje manualmente.
+  function limpiarNombre(username) {
+    return (username || '').replace(/^\[.*?\]\s*/, '').trim();
+  }
 
-      if (cmd === '!mina' && args.length >= 4) {
-        const [x, y, z] = args.slice(1, 4).map(Number);
-        if ([x, y, z].every(n => Number.isFinite(n))) minarBloque(x, y, z);
-        else bot.chat('Uso: !mina <x> <y> <z>');
-      } else if (cmd === '!minaarea' && args.length >= 7) {
-        const nums = args.slice(1, 7).map(Number);
-        if (nums.every(n => Number.isFinite(n))) minarArea(...nums);
-        else bot.chat('Uso: !minaarea <x1> <y1> <z1> <x2> <y2> <z2>');
-      } else if (cmd === '!minaveta' && args.length >= 4) {
-        const [x, y, z] = args.slice(1, 4).map(Number);
-        if ([x, y, z].every(n => Number.isFinite(n))) minarVeta(x, y, z);
-        else bot.chat('Uso: !minaveta <x> <y> <z>');
-      } else if (cmd === '!diamantes') {
-        minarMineral('diamond_ore');
-      } else if (cmd === '!hierro') {
-        minarMineral('iron_ore');
-      } else if (cmd === '!oro') {
-        minarMineral('gold_ore');
-      } else if (cmd === '!ven' && args.length >= 2) {
-        seguirJugador(args[1]);
-      } else if (cmd === '!vuelve') {
-        volverAlSpawn();
-      } else if (cmd === '!inventario') {
-        listarInventario();
-      } else if (cmd === '!pos1') {
-        marcarPos(1, username);
-      } else if (cmd === '!pos2') {
-        marcarPos(2, username);
-      } else if (cmd === '!sel') {
-        mostrarSeleccion();
-      } else if (cmd === '!minar') {
-        minarSeleccion();
-      } else if (cmd === '!limpiar') {
-        seleccion = { pos1: null, pos2: null };
-        bot.chat('Selección borrada');
-      } else if (cmd === '!stop') {
-        pararMinado();
-      } else if (cmd === '!ayuda' || cmd === '!help') {
-        bot.chat('Comandos: !pos1 | !pos2 | !minar | !sel | !limpiar | !mina x y z | !minaarea x1 y1 z1 x2 y2 z2 | !minaveta x y z | !diamantes | !hierro | !oro | !ven <jugador> | !vuelve | !inventario | !stop');
-      }
+  function procesarComando(username, mensaje) {
+    const nombreLimpio = limpiarNombre(username);
+    if (nombreLimpio === bot.username) return; // ignorar mensajes propios
+    // normalizar: acepta !pos1, /pos1 y //pos1 (WorldEdit style)
+    const args = mensaje.trim().replace(/^\/+/, '').split(/\s+/);
+    const cmd = args[0].toLowerCase();
+    console.log(`[${hora()}] 💬 Comando de ${nombreLimpio}: ${mensaje}`);
+
+    if (cmd === '!mina' && args.length >= 4) {
+      const [x, y, z] = args.slice(1, 4).map(Number);
+      if ([x, y, z].every(n => Number.isFinite(n))) minarBloque(x, y, z);
+      else bot.chat('Uso: !mina <x> <y> <z>');
+    } else if (cmd === '!minaarea' && args.length >= 7) {
+      const nums = args.slice(1, 7).map(Number);
+      if (nums.every(n => Number.isFinite(n))) minarArea(...nums);
+      else bot.chat('Uso: !minaarea <x1> <y1> <z1> <x2> <y2> <z2>');
+    } else if (cmd === '!minaveta' && args.length >= 4) {
+      const [x, y, z] = args.slice(1, 4).map(Number);
+      if ([x, y, z].every(n => Number.isFinite(n))) minarVeta(x, y, z);
+      else bot.chat('Uso: !minaveta <x> <y> <z>');
+    } else if (cmd === '!diamantes') {
+      minarMineral('diamond_ore');
+    } else if (cmd === '!hierro') {
+      minarMineral('iron_ore');
+    } else if (cmd === '!oro') {
+      minarMineral('gold_ore');
+    } else if (cmd === '!ven' && args.length >= 2) {
+      seguirJugador(limpiarNombre(args[1]));
+    } else if (cmd === '!vuelve') {
+      volverAlSpawn();
+    } else if (cmd === '!inventario') {
+      listarInventario();
+    } else if (cmd === '!pos1') {
+      marcarPos(1, nombreLimpio);
+    } else if (cmd === '!pos2') {
+      marcarPos(2, nombreLimpio);
+    } else if (cmd === '!sel') {
+      mostrarSeleccion();
+    } else if (cmd === '!minar') {
+      minarSeleccion();
+    } else if (cmd === '!limpiar') {
+      seleccion = { pos1: null, pos2: null };
+      bot.chat('Selección borrada');
+    } else if (cmd === '!stop') {
+      pararMinado();
+    } else if (cmd === '!ayuda' || cmd === '!help') {
+      bot.chat('Comandos: !pos1 | !pos2 | !minar | !sel | !limpiar | !mina x y z | !minaarea x1 y1 z1 x2 y2 z2 | !minaveta x y z | !diamantes | !hierro | !oro | !ven <jugador> | !vuelve | !inventario | !stop');
+    }
+  }
+
+  function arrancarChat() {
+    // 'message' cubre TODOS los formatos de chat (a diferencia de 'chat',
+    // que solo se dispara con formato estándar chat.type.text). Usar solo
+    // 'message' evita comandos duplicados.
+    bot.on('message', (jsonMsg) => {
+      try {
+        const texto = jsonMsg.toString();
+        // formato "<jugador> mensaje" (con prefijos opcionales antes)
+        const m = texto.match(/<(.+?)>\s*(.*)$/);
+        if (!m) return;
+        procesarComando(m[1], m[2]);
+      } catch (e) { /* ignorar */ }
     });
   }
 
