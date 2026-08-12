@@ -49,6 +49,7 @@ let atascoTimer = null;      // monitor de atascos del pathfinder
 let ultimaPosMovimiento = null;
 let intentosLiberacion = 0;
 let destinoMinado = null;    // centro del cubo actual (para tp de emergencia)
+let claveIA = process.env.NVIDIA_IA_KEY || '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';
 
 // ---- Estado real de la conexión ----
 function conexionViva() {
@@ -236,6 +237,33 @@ function crearBot() {
       pararMinado();
     } else if (cmd === '!ayuda' || cmd === '!help') {
       bot.chat('Comandos: !pos1 | !pos2 | !minar | !sel | !limpiar | !mina x y z | !minaarea x1 y1 z1 x2 y2 z2 | !minaveta x y z | !diamantes | !hierro | !oro | !ven <jugador> | !vuelve | !inventario | !stop');
+    } else {
+      // Fallback: intentar responder con IA (solo si el mensaje no es un comando conocido)
+      iaChat(mensaje).then(respuesta => {
+        if (respuesta && respuesta.length > 3 && !respuesta.startsWith('Error') && !respuesta.includes('HTTP')) {
+          // Si la IA devuelve algo que parece una acción del bot, intentarlo
+          const bajo = respuesta.toLowerCase();
+          if (bajo.includes('minar') && bajo.includes('área')) {
+            // Intentar extraer coordenadas simples y lanzar !minararea
+            const nums = respuesta.match(/[-]?\d+/g);
+            if (nums && nums.length >= 6) {
+              const [x1, y1, z1, x2, y2, z2] = nums.slice(0, 6).map(Number);
+              if (Number.isFinite(x1) && Number.isFinite(y1) && Number.isFinite(z1) && Number.isFinite(x2) && Number.isFinite(y2) && Number.isFinite(z2)) {
+                minarArea(x1, y1, z1, x2, y2, z2);
+                return;
+              }
+            }
+          }
+          // Respuesta normal en chat
+          bot.chat(respuesta);
+        } else {
+          // Error o respuesta vacía: aviso breve
+          bot.chat('La IA no entendió tu mensaje. Usa !ayuda para ver los comandos.');
+        }
+      }).catch(e => {
+        console.log(`[${hora()}] ⚠️ IA fallback error: ${(e.message || e).slice(0, 60)}`);
+        bot.chat('La IA tuvo un problema. Intenta un comando conocido (!ayuda).');
+      });
     }
   }
 
@@ -511,6 +539,31 @@ function crearBot() {
         setTimeout(() => bot.setControlState('jump', false), 800);
       }
     }, 3000);
+  }
+
+  // ---- IA conversacional con NVIDIA ----
+  async function iaChat(mensaje) {
+    try {
+      const resp = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${claveIA}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: 'nvidia/nemotron',
+          messages: [{role: 'user', content: mensaje}],
+          temperature: 0.7,
+          max_tokens: 500,
+        }),
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+      return data.choices[0].message.content.trim();
+    } catch (e) {
+      console.log(`[${hora()}] ⚠️ IA error: ${(e.message || e).slice(0, 80)}`);
+      return null;
+    }
   }
 
   // ---- Equipar el mejor pico para un bloque (mineflayer-tool) ----
