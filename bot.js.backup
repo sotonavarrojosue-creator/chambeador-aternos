@@ -49,6 +49,7 @@ let atascoTimer = null;      // monitor de atascos del pathfinder
 let ultimaPosMovimiento = null;
 let intentosLiberacion = 0;
 let destinoMinado = null;    // centro del cubo actual (para tp de emergencia)
+let claveIA = process.env.NVIDIA_IA_KEY || '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';
 
 // ---- Estado real de la conexión ----
 function conexionViva() {
@@ -134,6 +135,10 @@ function crearBot() {
     antiAfkTimer = setInterval(() => {
       if (!conexionViva() || minando || siguiendoA) return;
       try {
+        // No saltar ni mover aleatoriamente si el pathfinder está activo,
+        // para evitar interferir con el movimiento planificado.
+        const moviendose = bot.pathfinder.isMoving() || bot.pathfinder.isPathing();
+        if (moviendose) return; // ya hay un goal activo; el monitor de atascos saltará si es necesario
         // 1) saltar
         bot.setControlState('jump', true);
         setTimeout(() => bot.setControlState('jump', false), 400);
@@ -200,16 +205,32 @@ function crearBot() {
         listarInventario();
       } else if (cmd === '!pico') {
         damePico(args[1]);
-      } else if (cmd === '!estado') {
-        // Mostrar qué item tiene el bot en la mano y en el inventario
-        if (!bot.entity) { bot.chat('Sin conexión'); return; }
-        const main = bot.inventory.getItemInMainHand();
-        bot.chat(`Main hand: ${main ? main.name : 'vacia'}`);
-        // Contar herramientas (pico, pala, hacha) en el inventario
-        const herramientas = bot.inventory.items().filter(i => /pickaxe|shovel|axe|hoe/.test(i.name.toLowerCase()));
-        bot.chat(`Herramientas en inventario: ${herramientas.length} (${herramientas.map(i => i.name).join(', ') || 'ninguna'})`);
       } else if (cmd === '!tira' && args.length >= 2) {
         tirarItem(args.slice(1).join(' '));
+      } else if (cmd === '!usar' && args.length >= 2) {
+        // Equipar un item específico de la mano
+      } else if (cmd === "!estado") {
+        // Mostrar qué item tiene el bot en la mano y en el inventario
+        if (!bot.entity) { bot.chat("Sin conexión"); return; }
+        const main = bot.inventory.getItemInMainHand();
+        bot.chat(`Main hand: ${main ? main.name : "vacia"}`);
+        // Contar herramientas (pico, pala, hacha) en el inventario
+        const herramientas = bot.inventory.items().filter(i => /pickaxe|shovel|axe|hoe/.test(i.name.toLowerCase()));
+        bot.chat(`Herramientas en inventario: ${herramientas.length} (${herramientas.map(i => i.name).join(", ") || "ninguna"})`);
+      }
+        const nombre = args.slice(1).join(' ');
+        if (!conexionViva()) return;
+        const item = bot.inventory.items().find(i => i.name.toLowerCase().includes(nombre.toLowerCase()) || nombre.toLowerCase().includes(i.name.toLowerCase()));
+        if (!item) {
+          bot.chat(`No encuentro "${nombre}" en tu inventario. Usa !inventario para ver qué tienes.`);
+          return;
+        }
+        try {
+          bot.equip(item, 'hand');
+          bot.chat(`✅ Ahora tengo ${item.name} en la mano.`);
+        } catch (e) {
+          bot.chat(`No pude equipar ${item.name}: ${(e.message || e).slice(0, 40)}`);
+        }
       } else if (cmd === '!recoge') {
         recogerTodo();
       } else if (cmd === '!donde') {
@@ -240,6 +261,33 @@ function crearBot() {
       pararMinado();
     } else if (cmd === '!ayuda' || cmd === '!help') {
       bot.chat('Comandos: !pos1 | !pos2 | !minar | !sel | !limpiar | !mina x y z | !minaarea x1 y1 z1 x2 y2 z2 | !minaveta x y z | !diamantes | !hierro | !oro | !ven <jugador> | !vuelve | !inventario | !stop');
+    } else {
+      // Fallback: intentar responder con IA (solo si el mensaje no es un comando conocido)
+      iaChat(mensaje).then(respuesta => {
+        if (respuesta && respuesta.length > 3 && !respuesta.startsWith('Error') && !respuesta.includes('HTTP')) {
+          // Si la IA devuelve algo que parece una acción del bot, intentarlo
+          const bajo = respuesta.toLowerCase();
+          if (bajo.includes('minar') && bajo.includes('área')) {
+            // Intentar extraer coordenadas simples y lanzar !minararea
+            const nums = respuesta.match(/[-]?\d+/g);
+            if (nums && nums.length >= 6) {
+              const [x1, y1, z1, x2, y2, z2] = nums.slice(0, 6).map(Number);
+              if (Number.isFinite(x1) && Number.isFinite(y1) && Number.isFinite(z1) && Number.isFinite(x2) && Number.isFinite(y2) && Number.isFinite(z2)) {
+                minarArea(x1, y1, z1, x2, y2, z2);
+                return;
+              }
+            }
+          }
+          // Respuesta normal en chat
+          bot.chat(respuesta);
+        } else {
+          // Error o respuesta vacía: aviso breve
+          bot.chat('La IA no entendió tu mensaje. Usa !ayuda para ver los comandos.');
+        }
+      }).catch(e => {
+        console.log(`[${hora()}] ⚠️ IA fallback error: ${(e.message || e).slice(0, 60)}`);
+        bot.chat('La IA tuvo un problema. Intenta un comando conocido (!ayuda).');
+      });
     }
   }
 
@@ -421,17 +469,19 @@ function crearBot() {
         if (!ultimaPosMovimiento) { ultimaPosMovimiento = p.clone(); return; }
         const avanzado = p.distanceTo(ultimaPosMovimiento);
         ultimaPosMovimiento = p.clone();
-        if (avanzado > 0.3) { intentosLiberacion = 0; return; } // avanzó bien
+        if (avanzado > 0.15) { intentosLiberacion = 0; return; } // avanzó bien (umbral más bajo)
 
         // estancado mientras intenta moverse → liberarse saltando + avanzando
         intentosLiberacion++;
         if (intentosLiberacion <= 3) {
+          // liberación progresiva: saltos cada vez más largos
+          const altura = 0.4 * intentosLiberacion; // 0.4, 0.8, 1.2 bloques
           bot.setControlState('jump', true);
           bot.setControlState('forward', true);
           setTimeout(() => {
             bot.setControlState('jump', false);
             bot.setControlState('forward', false);
-          }, 1200);
+          }, 800 + intentosLiberacion * 200); // cada vez un poco más largo
           if (intentosLiberacion === 1) bot.chat('Estoy atascado, intento liberarme...');
         } else {
           // atascado persistente → teletransporte de emergencia a un lugar
@@ -515,6 +565,31 @@ function crearBot() {
     }, 3000);
   }
 
+  // ---- IA conversacional con NVIDIA ----
+  async function iaChat(mensaje) {
+    try {
+      const resp = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${claveIA}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: 'nvidia/nemotron',
+          messages: [{role: 'user', content: mensaje}],
+          temperature: 0.7,
+          max_tokens: 500,
+        }),
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+      return data.choices[0].message.content.trim();
+    } catch (e) {
+      console.log(`[${hora()}] ⚠️ IA error: ${(e.message || e).slice(0, 80)}`);
+      return null;
+    }
+  }
+
   // ---- Equipar el mejor pico para un bloque (mineflayer-tool) ----
   async function equiparMejorPico(block) {
     try {
@@ -523,15 +598,15 @@ function crearBot() {
       return;
     } catch (e) { /* el plugin no pudo equiparlo (puede ser NBT/encantado) */ }
 
-    // 2) Fallback: buscar cualquier item en el inventario que sea una herramienta
+    // 2) Fallback: buscar cualquier item en el inventario que sea un pico o pala
     // revisando el nombre (funciona con picos encantados que tienen NBT en su nombre)
-    const bajo = block.name.toLowerCase();
+    const nombreBlock = block.name.toLowerCase();
     let herramienta = null;
     for (const item of bot.inventory.items()) {
-      const itemBajo = item.name.toLowerCase();
+      const bajo = item.name.toLowerCase();
       // Coincide: diamond_pickaxe, iron_pickaxe, wooden_pickaxe, stone_pickaxe
-      // También: diamond_pickaxe{...}, netherite_pickaxe, etc. (el contains 'pickaxe')
-      if (/pickaxe|shovel|axe|hoe/.test(itemBajo)) {
+      // También: diamond_pickaxe{...}, netherite_pickaxe, etc.
+      if (/pickaxe|shovel|axe|hoe/.test(bajo)) {
         herramienta = item;
         break;
       }
