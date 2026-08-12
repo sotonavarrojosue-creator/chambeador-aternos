@@ -199,11 +199,21 @@ function crearBot() {
       } else if (cmd === '!donde') {
         const p = bot.entity ? bot.entity.position : null;
         bot.chat(p ? `Estoy en ${Math.floor(p.x)} ${Math.floor(p.y)} ${Math.floor(p.z)} (mírame y usa !ven)` : 'No tengo posición');
-      } else if (cmd === '!pos1') {
-      marcarPos(1, nombreLimpio);
-    } else if (cmd === '!pos2') {
-      marcarPos(2, nombreLimpio);
-    } else if (cmd === '!sel') {
+      } else if (cmd === '!pos1' || cmd === '!pos2') {
+        const n = cmd === '!pos1' ? 1 : 2;
+        // si viene con coordenadas directas, no depende de la mirada del jugador
+        if (args.length >= 4) {
+          const [x, y, z] = args.slice(1, 4).map(Number);
+          if ([x, y, z].every(v => Number.isFinite(v))) {
+            seleccion[n === 1 ? 'pos1' : 'pos2'] = new Vec3(x, y, z);
+            bot.chat(`Pos${n} marcada: ${x} ${y} ${z} (coordenadas directas)`);
+          } else {
+            bot.chat(`Uso: !pos${n} <x> <y> <z> — o apunta al bloque y escribe !pos${n}`);
+          }
+        } else {
+          marcarPos(n, nombreLimpio);
+        }
+      } else if (cmd === '!sel') {
       mostrarSeleccion();
     } else if (cmd === '!minar') {
       minarSeleccion();
@@ -322,11 +332,12 @@ function crearBot() {
       bot.chat('Necesitas marcar !pos1 y !pos2 primero');
       return;
     }
-    // Aviso si el cubo quedó plano (mismo plano X o Z) — el usuario marcó dos
-    // puntos de la misma pared en vez de esquinas opuestas
-    const planosIguales = (p1.x === p2.x) ? 'X' : (p1.z === p2.z) ? 'Z' : null;
+    // Aviso si el cubo quedó plano (mismo plano X, Z o Y) — el usuario marcó dos
+    // puntos de la misma cara/pared en vez de esquinas opuestas
+    const planosIguales = (p1.x === p2.x) ? 'X' : (p1.z === p2.z) ? 'Z' : (p1.y === p2.y) ? 'Y' : null;
     if (planosIguales) {
-      bot.chat(`⚠ Las dos posiciones tienen el mismo ${planosIguales} → el cubo será de 1 bloque de ancho. Marca esquinas OPUESTAS del volumen (una abajo, la otra arriba en diagonal).`);
+      const eje = planosIguales === 'X' ? 'misma coordenada X' : planosIguales === 'Z' ? 'misma coordenada Z' : 'la misma altura (Y)';
+      bot.chat(`⚠ Las dos posiciones tienen ${eje} → el cubo será de 1 bloque de grosor. Marca esquinas OPUESTAS del volumen (abajo-izquierda y arriba-derecha en diagonal).`);
       return;
     }
     minarArea(p1.x, p1.y, p1.z, p2.x, p2.y, p2.z);
@@ -373,19 +384,58 @@ function crearBot() {
   }
 
   // ---- Vigilar vida/hambre/peligro mientras mina ----
+  let comiendo = false;
+  let ultimoPedidoComida = 0;
+  const COMIDA_PREFERIDA = ['cooked_beef', 'cooked_porkchop', 'cooked_chicken', 'bread', 'apple', 'baked_potato', 'golden_apple'];
+
+  // comer si hay hambre: busca comida en el inventario; si no hay, el bot es OP
+  // así que se da comida a sí mismo con /give y la come.
+  async function comerSiHambre() {
+    if (comiendo || !bot.entity || bot.food >= 10) return;
+    comiendo = true;
+    try {
+      let comida = bot.inventory.items().find(i => COMIDA_PREFERIDA.includes(i.name));
+      if (!comida) {
+        if (Date.now() - ultimoPedidoComida > 60000) {
+          ultimoPedidoComida = Date.now();
+          bot.chat(`/give ${bot.username} cooked_beef 64`);
+          await new Promise(r => setTimeout(r, 2500));
+          comida = bot.inventory.items().find(i => COMIDA_PREFERIDA.includes(i.name));
+        } else {
+          return; // ya pedimos hace poco, esperar a que llegue
+        }
+      }
+      if (!comida) return;
+      await bot.equip(comida, 'hand');
+      // consumir con timeout: no colgar nunca
+      await Promise.race([
+        bot.consume(),
+        new Promise(r => setTimeout(r, 8000)),
+      ]);
+      console.log(`[${hora()}] 🍖 Comí ${comida.name} (hambre: ${bot.food})`);
+    } catch (e) {
+      console.log(`[${hora()}] ⚠️ No pude comer: ${(e.message || e).slice(0, 50)}`);
+    } finally {
+      comiendo = false;
+    }
+  }
+
   function vigilarVida() {
     if (minarVigiaTimer) clearInterval(minarVigiaTimer);
     minarVigiaTimer = setInterval(() => {
       if (!minando) { clearInterval(minarVigiaTimer); minarVigiaTimer = null; return; }
-      // vida < 3 corazones o hambre < 3
-      if (bot.health < 6 || bot.food < 6) {
+      // vida < 3 corazones → PELIGRO real, parar
+      if (bot.health < 6) {
         try { bot.pathfinder.stop(); } catch (e) {}
-        bot.chat('Me estoy muriendo o tengo hambre, paro de minar');
+        bot.chat('Me estoy muriendo, paro de minar');
         minando = false;
         clearInterval(minarVigiaTimer); minarVigiaTimer = null;
         reanudarAntiAfk();
         return;
       }
+      // hambre baja → comer en vez de abortar (el bot nunca comía: llevaba
+      // días con food=0 y abortaba TODO el minado a los 3 segundos)
+      if (bot.food < 6) comerSiHambre();
       // si está dentro de lava o agua, saltar para salir
       const bloqueEnMi = bot.blockAt(bot.entity.position);
       if (bloqueEnMi && (bloqueEnMi.name === 'lava' || bloqueEnMi.name === 'water')) {
@@ -409,6 +459,7 @@ function crearBot() {
     minando = true;
     pausarAntiAfk();
     vigilarVida();
+    comerSiHambre(); // comer antes de minar (el bot nunca comía)
     bot.chat(`Voy a minar ${x} ${y} ${z}`);
     try {
       const block = bot.blockAt(new Vec3(x, y, z));
@@ -435,6 +486,7 @@ function crearBot() {
     minando = true;
     pausarAntiAfk();
     vigilarVida();
+    comerSiHambre(); // comer antes de minar (el bot nunca comía)
     bot.chat(`Buscando veta en ${x} ${y} ${z}...`);
     try {
       const block = bot.blockAt(new Vec3(x, y, z));
@@ -465,6 +517,7 @@ function crearBot() {
     minando = true;
     pausarAntiAfk();
     vigilarVida();
+    comerSiHambre(); // comer antes de minar (el bot nunca comía)
     bot.chat(`Buscando ${tipo.replace('_ore', '')} cerca...`);
     try {
       const posiciones = bot.findBlocks({
@@ -559,6 +612,32 @@ function crearBot() {
     bot.chat('Listo.');
   }
 
+  // ---- Buscar un lugar seguro y parado cerca de una posición (para /tp):
+  // bloque sólido debajo, aire en pies y cabeza. Escanea capas dy=-2..+2 y
+  // radios 1..8 alrededor del centro del cubo. ----
+  function buscarLugarParado(cx, cy, cz) {
+    for (let dy = -2; dy <= 2; dy++) {
+      const y = cy + dy;
+      for (let r = 1; r <= 8; r++) {
+        for (let dx = -r; dx <= r; dx++) {
+          for (let dz = -r; dz <= r; dz++) {
+            if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue; // solo borde del radio
+            const x = cx + dx, z = cz + dz;
+            const abajo = bot.blockAt(new Vec3(x, y - 1, z));
+            const pies = bot.blockAt(new Vec3(x, y, z));
+            const cabeza = bot.blockAt(new Vec3(x, y + 1, z));
+            if (abajo && abajo.boundingBox === 'block' &&
+                pies && pies.boundingBox !== 'block' &&
+                cabeza && cabeza.boundingBox !== 'block') {
+              return new Vec3(x, y, z);
+            }
+          }
+        }
+      }
+    }
+    return null;
+  }
+
   // ---- Mina TODO el volumen entre dos esquinas (estilo WorldEdit):
   // genera todas las posiciones del cubo y va picando capa por capa. ----
   async function minarArea(x1, y1, z1, x2, y2, z2) {
@@ -577,13 +656,32 @@ function crearBot() {
     minando = true;
     pausarAntiAfk();
     vigilarVida();
+    comerSiHambre(); // comer antes de minar (el bot nunca comía)
     bot.chat(`Minando cubo ${minX},${minY},${minZ} → ${maxX},${maxY},${maxZ} (${volumen} bloques de volumen)`);
 
     try {
       // ir CERCA del centro del cubo para forzar la carga de chunks
       // (GoalNear, no GoalBlock: si el cubo es sólido, el bot no puede entrar)
       const centro = new Vec3((minX + maxX) >> 1, (minY + maxY) >> 1, (minZ + maxZ) >> 1);
-      await bot.pathfinder.goto(new goals.GoalNear(centro.x, centro.y, centro.z, 5));
+      // si el cubo está lejos o muy por encima (ruta imposible: canDig=false,
+      // sin torres), el bot es OP → se teletransporta a un lugar seguro cercano
+      const distBot = bot.entity.position.distanceTo(centro);
+      if (distBot > 15 || Math.abs(bot.entity.position.y - centro.y) > 4) {
+        const lugar = buscarLugarParado(centro.x, centro.y, centro.z);
+        if (lugar) {
+          bot.chat(`El cubo está a ${Math.round(distBot)} bloques, me teletransporto cerca...`);
+          bot.chat(`/tp ${bot.username} ${lugar.x} ${lugar.y} ${lugar.z}`);
+          await new Promise(r => setTimeout(r, 3000)); // esperar a que carguen chunks
+        } else {
+          bot.chat('No encuentro un lugar seguro cerca del cubo, intento caminar...');
+        }
+      }
+      try {
+        await bot.pathfinder.goto(new goals.GoalNear(centro.x, centro.y, centro.z, 5));
+      } catch (e) {
+        // ruta imposible no es fatal: cada bloque se intenta por separado
+        console.log(`[${hora()}] ⚠️ GoalNear falló (no fatal): ${(e.message || e).slice(0, 50)}`);
+      }
       await new Promise(r => setTimeout(r, 3000)); // esperar a que carguen los chunks
 
       // generar TODAS las posiciones del cubo, capa por capa.
