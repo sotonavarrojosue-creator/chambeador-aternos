@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
  * Chambeador — Bot 24/7 para Aternos (sanfranblock)
- * Mantiene el server online moviéndose como un jugador real.
+ * Mantiene el server online moviéndose como un jugador real + minería
+ * controlada por chat (estilo WorldEdit).
  *
  * Requisito: el server de Aternos debe tener instalados los plugins
  * ViaVersion + ViaBackwards (el server es MC 26.2 y mineflayer soporta
@@ -14,7 +15,9 @@ const mineflayer = require('mineflayer');
 const http = require('http');
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
 const collectBlock = require('mineflayer-collectblock');
+const toolPlugin = require('mineflayer-tool');
 const Vec3 = require('vec3');
+
 const CONFIG = {
   host: 'sanfranblock.aternos.me',
   port: 38089,
@@ -23,7 +26,13 @@ const CONFIG = {
   version: '1.21.11',       // última soportada por mineflayer (ViaVersion traduce)
   antiAfkIntervalo: 25000,  // ms entre "actividades"
   watchdogIntervalo: 20000, // ms entre chequeos de conexión real
+  alcanceDig: 4.5,          // distancia de dig en Minecraft
 };
+
+// Bloques que no se minan nunca
+const NO_MINABLES = new Set(['air', 'cave_air', 'void_air', 'water', 'lava', 'bedrock']);
+// Basura que se dropea cuando el inventario está lleno
+const BASURA = new Set(['dirt', 'stone', 'cobblestone', 'gravel', 'sand', 'grass_block', 'short_grass', 'tall_grass', 'pink_petals', 'dandelion', 'poppy', 'azure_bluet', 'allium', 'cornflower', 'oxeye_daisy', 'wheat_seeds']);
 
 let bot = null;
 let esperandoServerOffline = false;
@@ -33,6 +42,8 @@ let watchdogTimer = null;
 let reconectando = false;
 let minando = false;        // true mientras el bot mina (pausa el anti-AFK)
 let minarVigiaTimer = null; // vigila la vida mientras mina
+let siguiendoA = null;      // username al que el bot sigue (!ven)
+let seguirTimer = null;     // timer de seguimiento
 
 // ---- Estado real de la conexión ----
 function conexionViva() {
@@ -45,6 +56,9 @@ function conexionViva() {
     if (socket && socket.destroyed) return false;
     // 3) no debe haber estado de cierre
     if (bot._client && bot._client.state === 'closed') return false;
+    // 4) la posición no debe ser NaN (desync raro)
+    const p = bot.entity.position;
+    if (!Number.isFinite(p.x) || !Number.isFinite(p.y) || !Number.isFinite(p.z)) return false;
     return true;
   } catch (e) {
     return false;
@@ -59,6 +73,7 @@ const server = http.createServer((req, res) => {
     bot: CONFIG.username,
     conectado: conexionViva(),
     spawnHace: ultimoSpawn ? Math.round((Date.now() - ultimoSpawn) / 1000) + 's' : 'nunca',
+    minando,
     server: `${CONFIG.host}:${CONFIG.port}`,
   }));
 });
@@ -79,19 +94,25 @@ function crearBot() {
     version: CONFIG.version,
   });
 
-  // Plugins: pathfinder (moverse) + collectblock (minar y recoger drops)
+  // Plugins: pathfinder (moverse) + collectblock (minar/recoger) + tool (mejor pico)
   bot.loadPlugin(pathfinder);
   bot.loadPlugin(collectBlock.plugin);
+  bot.loadPlugin(toolPlugin.plugin);
 
   bot.on('login', () => console.log(`[${hora()}] Login OK`));
   bot.on('spawn', () => {
     ultimoSpawn = Date.now();
     esperandoServerOffline = false;
     console.log(`[${hora()}] ✅ En el server. Bot activo (${bot.entity.position.x.toFixed(1)}, ${bot.entity.position.y.toFixed(1)}, ${bot.entity.position.z.toFixed(1)})`);
-    // configurar pathfinder con los movimientos del bot
+    // configurar pathfinder con movimientos optimizados:
+    // canDig=false → el pathfinder NO rompe bloques extra (evita destrozar el cubo)
+    // allow1by1towers=false → no construye torres raras
     try {
       const mcData = require('minecraft-data')(bot.version);
-      bot.pathfinder.setMovements(new Movements(bot, mcData));
+      const movements = new Movements(bot, mcData);
+      movements.canDig = false;
+      movements.allow1by1towers = false;
+      bot.pathfinder.setMovements(movements);
     } catch (e) {
       console.log(`[${hora()}] ⚠️ No se pudo configurar pathfinder: ${e.message}`);
     }
@@ -104,7 +125,7 @@ function crearBot() {
   function arrancarAntiAfk() {
     if (antiAfkTimer) clearInterval(antiAfkTimer);
     antiAfkTimer = setInterval(() => {
-      if (!conexionViva()) return;
+      if (!conexionViva() || minando || siguiendoA) return;
       try {
         // 1) saltar
         bot.setControlState('jump', true);
@@ -144,10 +165,26 @@ function crearBot() {
         const nums = args.slice(1, 7).map(Number);
         if (nums.every(n => Number.isFinite(n))) minarArea(...nums);
         else bot.chat('Uso: !minaarea <x1> <y1> <z1> <x2> <y2> <z2>');
+      } else if (cmd === '!minaveta' && args.length >= 4) {
+        const [x, y, z] = args.slice(1, 4).map(Number);
+        if ([x, y, z].every(n => Number.isFinite(n))) minarVeta(x, y, z);
+        else bot.chat('Uso: !minaveta <x> <y> <z>');
+      } else if (cmd === '!diamantes') {
+        minarMineral('diamond_ore');
+      } else if (cmd === '!hierro') {
+        minarMineral('iron_ore');
+      } else if (cmd === '!oro') {
+        minarMineral('gold_ore');
+      } else if (cmd === '!ven' && args.length >= 2) {
+        seguirJugador(args[1]);
+      } else if (cmd === '!vuelve') {
+        volverAlSpawn();
+      } else if (cmd === '!inventario') {
+        listarInventario();
       } else if (cmd === '!stop') {
         pararMinado();
       } else if (cmd === '!ayuda' || cmd === '!help') {
-        bot.chat('Comandos: !mina x y z | !minaarea x1 y1 z1 x2 y2 z2 | !stop');
+        bot.chat('Comandos: !mina x y z | !minaarea x1 y1 z1 x2 y2 z2 | !minaveta x y z | !diamantes | !hierro | !oro | !ven <jugador> | !vuelve | !inventario | !stop');
       }
     });
   }
@@ -157,25 +194,72 @@ function crearBot() {
     if (antiAfkTimer) { clearInterval(antiAfkTimer); antiAfkTimer = null; }
   }
   function reanudarAntiAfk() {
-    if (!antiAfkTimer && conexionViva()) arrancarAntiAfk();
+    if (!antiAfkTimer && conexionViva() && !siguiendoA) arrancarAntiAfk();
   }
 
-  // Vigilar vida mientras mina: si baja de 3 corazones, parar
+  // ---- Recoger drops (items) cercanos del suelo ----
+  async function recogerDropsCercanos(distancia) {
+    try {
+      const drops = Object.values(bot.entities).filter(e =>
+        e.type === 'object' && e.objectType === 'Item' &&
+        bot.entity.position.distanceTo(e.position) < distancia
+      );
+      if (drops.length > 0) {
+        await bot.collectBlock.collect(drops, { ignoreNoPath: true });
+      }
+    } catch (e) { /* ignorar */ }
+  }
+
+  // ---- Gestión de inventario: si está casi lleno, dropear basura ----
+  function gestionarInventario() {
+    if (!bot.inventory) return;
+    const slots = bot.inventory.slots();
+    const vacios = slots.filter(s => !s).length;
+    if (vacios < 5) {
+      for (const slot of slots) {
+        if (!slot) continue;
+        if (BASURA.has(slot.name)) {
+          try { bot.tossStack(slot); } catch (e) {}
+          return true;
+        }
+      }
+      bot.chat('Inventario lleno y sin basura que dropear');
+      return true;
+    }
+    return false;
+  }
+
+  // ---- Vigilar vida/hambre/peligro mientras mina ----
   function vigilarVida() {
     if (minarVigiaTimer) clearInterval(minarVigiaTimer);
     minarVigiaTimer = setInterval(() => {
       if (!minando) { clearInterval(minarVigiaTimer); minarVigiaTimer = null; return; }
-      if (bot.health < 6) {
+      // vida < 3 corazones o hambre < 3
+      if (bot.health < 6 || bot.food < 6) {
         try { bot.pathfinder.stop(); } catch (e) {}
-        bot.chat('Me estoy muriendo, paro de minar');
+        bot.chat('Me estoy muriendo o tengo hambre, paro de minar');
         minando = false;
         clearInterval(minarVigiaTimer); minarVigiaTimer = null;
         reanudarAntiAfk();
+        return;
+      }
+      // si está dentro de lava o agua, saltar para salir
+      const bloqueEnMi = bot.blockAt(bot.entity.position);
+      if (bloqueEnMi && (bloqueEnMi.name === 'lava' || bloqueEnMi.name === 'water')) {
+        bot.setControlState('jump', true);
+        setTimeout(() => bot.setControlState('jump', false), 800);
       }
     }, 3000);
   }
 
-  // Mina UN bloque en coordenadas
+  // ---- Equipar el mejor pico para un bloque (mineflayer-tool) ----
+  async function equiparMejorPico(block) {
+    try {
+      await bot.tool.equipForBlock(block);
+    } catch (e) { /* sin pico: mina a mano */ }
+  }
+
+  // ---- Mina UN bloque en coordenadas ----
   async function minarBloque(x, y, z) {
     if (!conexionViva()) return;
     if (minando) { bot.chat('Ya estoy minando, usa !stop primero'); return; }
@@ -185,14 +269,14 @@ function crearBot() {
     bot.chat(`Voy a minar ${x} ${y} ${z}`);
     try {
       const block = bot.blockAt(new Vec3(x, y, z));
-      if (!block || block.name === 'air') {
-        bot.chat('Ese bloque no existe o es aire');
+      if (!block || NO_MINABLES.has(block.name)) {
+        bot.chat('Ese bloque no existe o no es minable');
         minando = false; reanudarAntiAfk(); return;
       }
-      // acercarse al bloque
-      await bot.pathfinder.goto(new goals.GoalNear(x, y, z, 2));
-      // minarlo y recoger el drop
-      await bot.collectBlock.collect([block]);
+      await equiparMejorPico(block);
+      // GoalLookAtBlock: se posiciona mirando la cara del bloque (más fiable que GoalNear)
+      await bot.pathfinder.goto(new goals.GoalLookAtBlock(block.position, bot.world, { reach: CONFIG.alcanceDig }));
+      await bot.dig(block);
       bot.chat(`Listo, miné ${block.name}`);
     } catch (e) {
       bot.chat(`No pude minar: ${(e.message || e).slice(0, 60)}`);
@@ -201,8 +285,106 @@ function crearBot() {
     reanudarAntiAfk();
   }
 
-  // Mina TODO el volumen entre dos esquinas (estilo WorldEdit):
-  // genera todas las posiciones del cubo y va picando capa por capa.
+  // ---- Mina una VETA completa (flood-fill del mismo tipo de bloque) ----
+  async function minarVeta(x, y, z) {
+    if (!conexionViva()) return;
+    if (minando) { bot.chat('Ya estoy minando, usa !stop primero'); return; }
+    minando = true;
+    pausarAntiAfk();
+    vigilarVida();
+    bot.chat(`Buscando veta en ${x} ${y} ${z}...`);
+    try {
+      const block = bot.blockAt(new Vec3(x, y, z));
+      if (!block || NO_MINABLES.has(block.name)) {
+        bot.chat('Ese bloque no existe o no es minable');
+        minando = false; reanudarAntiAfk(); return;
+      }
+      // flood-fill: todos los bloques conectados del mismo tipo
+      const veta = bot.collectBlock.findFromVein(block);
+      if (veta.length === 0) {
+        bot.chat('No encontré veta');
+        minando = false; reanudarAntiAfk(); return;
+      }
+      bot.chat(`Veta de ${block.name}: ${veta.length} bloques. Picando...`);
+      await bot.collectBlock.collect(veta, { ignoreNoPath: true });
+      bot.chat(`Veta minada: ${veta.length} bloques. Listo!`);
+    } catch (e) {
+      bot.chat(`Veta interrumpida: ${(e.message || e).slice(0, 60)}`);
+    }
+    minando = false;
+    reanudarAntiAfk();
+  }
+
+  // ---- Mina minerales cercanos (diamantes, hierro, oro...) ----
+  async function minarMineral(tipo) {
+    if (!conexionViva()) return;
+    if (minando) { bot.chat('Ya estoy minando, usa !stop primero'); return; }
+    minando = true;
+    pausarAntiAfk();
+    vigilarVida();
+    bot.chat(`Buscando ${tipo.replace('_ore', '')} cerca...`);
+    try {
+      const posiciones = bot.findBlocks({
+        matching: b => b && b.name === tipo,
+        maxDistance: 64,
+        count: 20,
+      });
+      if (posiciones.length === 0) {
+        bot.chat(`No veo ${tipo.replace('_ore', '')} cerca (radio 64)`);
+        minando = false; reanudarAntiAfk(); return;
+      }
+      const bloques = posiciones.map(p => bot.blockAt(p)).filter(b => b);
+      bot.chat(`Encontré ${bloques.length} ${tipo.replace('_ore', '')}. Picando...`);
+      await bot.collectBlock.collect(bloques, { ignoreNoPath: true });
+      bot.chat(`Listo, miné ${bloques.length} ${tipo.replace('_ore', '')}`);
+    } catch (e) {
+      bot.chat(`Minado interrumpido: ${(e.message || e).slice(0, 60)}`);
+    }
+    minando = false;
+    reanudarAntiAfk();
+  }
+
+  // ---- Seguir a un jugador (!ven) ----
+  function seguirJugador(username) {
+    if (!conexionViva()) return;
+    if (minando) { bot.chat('Estoy minando, usa !stop primero'); return; }
+    siguiendoA = username;
+    pausarAntiAfk();
+    bot.chat(`Te sigo, ${username}. !stop para parar`);
+    if (seguirTimer) clearInterval(seguirTimer);
+    seguirTimer = setInterval(async () => {
+      if (!conexionViva() || !siguiendoA) { clearInterval(seguirTimer); seguirTimer = null; return; }
+      const jugador = bot.players[siguiendoA] && bot.players[siguiendoA].entity;
+      if (!jugador) return;
+      try {
+        await bot.pathfinder.goto(new goals.GoalNear(jugador.position.x, jugador.position.y, jugador.position.z, 2));
+      } catch (e) { /* reintenta en el siguiente tick */ }
+    }, 3000);
+  }
+
+  // ---- Volver al spawn (!vuelve) ----
+  async function volverAlSpawn() {
+    if (!conexionViva()) return;
+    if (minando) { bot.chat('Estoy minando, usa !stop primero'); return; }
+    if (!bot.spawnPoint) { bot.chat('No sé dónde está el spawn'); return; }
+    bot.chat('Volviendo al spawn...');
+    try {
+      await bot.pathfinder.goto(new goals.GoalBlock(bot.spawnPoint.x, bot.spawnPoint.y, bot.spawnPoint.z));
+      bot.chat('Llegué al spawn');
+    } catch (e) {
+      bot.chat(`No pude volver: ${(e.message || e).slice(0, 60)}`);
+    }
+  }
+
+  // ---- Listar inventario (!inventario) ----
+  function listarInventario() {
+    if (!conexionViva()) return;
+    const items = bot.inventory.items().map(i => `${i.name}x${i.count}`).join(', ');
+    bot.chat(`Inventario: ${items || 'vacío'}`);
+  }
+
+  // ---- Mina TODO el volumen entre dos esquinas (estilo WorldEdit):
+  // genera todas las posiciones del cubo y va picando capa por capa. ----
   async function minarArea(x1, y1, z1, x2, y2, z2) {
     if (!conexionViva()) return;
     if (minando) { bot.chat('Ya estoy minando, usa !stop primero'); return; }
@@ -222,9 +404,10 @@ function crearBot() {
     bot.chat(`Minando cubo ${minX},${minY},${minZ} → ${maxX},${maxY},${maxZ} (${volumen} bloques de volumen)`);
 
     try {
-      // ir al centro del cubo para forzar la carga de chunks
+      // ir CERCA del centro del cubo para forzar la carga de chunks
+      // (GoalNear, no GoalBlock: si el cubo es sólido, el bot no puede entrar)
       const centro = new Vec3((minX + maxX) >> 1, (minY + maxY) >> 1, (minZ + maxZ) >> 1);
-      await bot.pathfinder.goto(new goals.GoalBlock(centro.x, centro.y, centro.z));
+      await bot.pathfinder.goto(new goals.GoalNear(centro.x, centro.y, centro.z, 5));
       await new Promise(r => setTimeout(r, 3000)); // esperar a que carguen los chunks
 
       // generar TODAS las posiciones del cubo, capa por capa.
@@ -239,11 +422,11 @@ function crearBot() {
         }
       }
 
-      // filtrar solo bloques reales (aire, agua, lava y bedrock no se minan)
+      // filtrar solo bloques reales
       const bloques = [];
       for (const pos of posiciones) {
         const b = bot.blockAt(pos);
-        if (b && !['air', 'cave_air', 'void_air', 'water', 'lava', 'bedrock'].includes(b.name)) {
+        if (b && !NO_MINABLES.has(b.name)) {
           bloques.push(b);
         }
       }
@@ -253,19 +436,26 @@ function crearBot() {
         minando = false; reanudarAntiAfk(); return;
       }
 
-      bot.chat(`Encontré ${bloques.length} bloques minables. Picando...`);
-      // por cada bloque: si está al alcance, dig directo (sin pathfinder, evita
-      // el bug "Took to long to decide path"); si está lejos, acercarse y dig.
+      // los bloques bajo los pies del bot van al final (evita caerse mientras mina)
+      const bajoPies = bloques.filter(b => {
+        const p = bot.entity.position;
+        return Math.floor(p.x) === b.position.x && Math.floor(p.z) === b.position.z && Math.floor(p.y) - 1 === b.position.y;
+      });
+      const resto = bloques.filter(b => !bajoPies.includes(b));
+      const orden = [...resto, ...bajoPies];
+
+      bot.chat(`Encontré ${orden.length} bloques minables. Picando...`);
+      // por cada bloque: equipar pico, acercarse (GoalLookAtBlock) y dig con reintentos.
       // Si uno falla, sigue con el siguiente.
-      const ALCANCE = 4.5; // distancia de dig en Minecraft
       let minados = 0;
-      for (let i = 0; i < bloques.length && minando && conexionViva(); i++) {
-        const block = bloques[i];
+      for (let i = 0; i < orden.length && minando && conexionViva(); i++) {
+        const block = orden[i];
         try {
+          await equiparMejorPico(block);
           const dist = bot.entity.position.distanceTo(block.position);
-          if (dist > ALCANCE) {
+          if (dist > CONFIG.alcanceDig) {
             try {
-              await bot.pathfinder.goto(new goals.GoalNear(block.position.x, block.position.y, block.position.z, 3));
+              await bot.pathfinder.goto(new goals.GoalLookAtBlock(block.position, bot.world, { reach: CONFIG.alcanceDig }));
             } catch (e) {
               // si no puede calcular ruta, intentar dig directo igualmente
             }
@@ -292,17 +482,19 @@ function crearBot() {
         } catch (e) {
           console.log(`[${hora()}] Bloque ${i} falló: ${e.message.slice(0, 50)}`);
         }
-        // recoger drops acumulados cada 10 bloques
+        // recoger drops acumulados y gestionar inventario cada 10 bloques
         if (minados > 0 && minados % 10 === 0) {
-          try { await bot.collectBlock.collectNearby(8); } catch (e) {}
-          bot.chat(`Progreso: ${minados}/${bloques.length} bloques minados`);
+          try { await recogerDropsCercanos(8); } catch (e) {}
+          gestionarInventario();
+          bot.chat(`Progreso: ${minados}/${orden.length} bloques minados`);
         }
       }
       // recoger drops restantes al terminar
-      try { await bot.collectBlock.collectNearby(16); } catch (e) {}
+      try { await recogerDropsCercanos(16); } catch (e) {}
+      gestionarInventario();
 
-      if (minando) bot.chat(`Área minada: ${minados}/${bloques.length} bloques. Listo!`);
-      else bot.chat(`Detenido con ${minados}/${bloques.length} bloques minados`);
+      if (minando) bot.chat(`Área minada: ${minados}/${orden.length} bloques. Listo!`);
+      else bot.chat(`Detenido con ${minados}/${orden.length} bloques minados`);
     } catch (e) {
       bot.chat(`Minado interrumpido: ${(e.message || e).slice(0, 60)}`);
     }
@@ -311,6 +503,14 @@ function crearBot() {
   }
 
   function pararMinado() {
+    if (siguiendoA) {
+      siguiendoA = null;
+      if (seguirTimer) { clearInterval(seguirTimer); seguirTimer = null; }
+      try { bot.pathfinder.stop(); } catch (e) {}
+      reanudarAntiAfk();
+      bot.chat('Dejé de seguirte.');
+      return;
+    }
     if (!minando) { bot.chat('No estoy minando'); return; }
     try { bot.pathfinder.stop(); } catch (e) {}
     minando = false;
@@ -354,7 +554,9 @@ function reconectar() {
   if (antiAfkTimer) { clearInterval(antiAfkTimer); antiAfkTimer = null; }
   if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; }
   if (minarVigiaTimer) { clearInterval(minarVigiaTimer); minarVigiaTimer = null; }
+  if (seguirTimer) { clearInterval(seguirTimer); seguirTimer = null; }
   minando = false;
+  siguiendoA = null;
 
   // cerrar bot viejo si sigue vivo
   if (bot) {
