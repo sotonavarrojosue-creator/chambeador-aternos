@@ -44,6 +44,7 @@ let minando = false;        // true mientras el bot mina (pausa el anti-AFK)
 let minarVigiaTimer = null; // vigila la vida mientras mina
 let siguiendoA = null;      // username al que el bot sigue (!ven)
 let seguirTimer = null;     // timer de seguimiento
+let seleccion = { pos1: null, pos2: null }; // selección estilo WorldEdit (!pos1 / !pos2)
 
 // ---- Estado real de la conexión ----
 function conexionViva() {
@@ -154,7 +155,8 @@ function crearBot() {
   function arrancarChat() {
     bot.on('chat', (username, message) => {
       if (username === bot.username) return; // ignorar mensajes propios
-      const args = message.trim().split(/\s+/);
+      // normalizar: acepta !pos1, /pos1 y //pos1 (WorldEdit style)
+      const args = message.trim().replace(/^\/+/, '').split(/\s+/);
       const cmd = args[0].toLowerCase();
 
       if (cmd === '!mina' && args.length >= 4) {
@@ -181,12 +183,62 @@ function crearBot() {
         volverAlSpawn();
       } else if (cmd === '!inventario') {
         listarInventario();
+      } else if (cmd === '!pos1') {
+        marcarPos(1, username);
+      } else if (cmd === '!pos2') {
+        marcarPos(2, username);
+      } else if (cmd === '!sel') {
+        mostrarSeleccion();
+      } else if (cmd === '!minar') {
+        minarSeleccion();
+      } else if (cmd === '!limpiar') {
+        seleccion = { pos1: null, pos2: null };
+        bot.chat('Selección borrada');
       } else if (cmd === '!stop') {
         pararMinado();
       } else if (cmd === '!ayuda' || cmd === '!help') {
-        bot.chat('Comandos: !mina x y z | !minaarea x1 y1 z1 x2 y2 z2 | !minaveta x y z | !diamantes | !hierro | !oro | !ven <jugador> | !vuelve | !inventario | !stop');
+        bot.chat('Comandos: !pos1 | !pos2 | !minar | !sel | !limpiar | !mina x y z | !minaarea x1 y1 z1 x2 y2 z2 | !minaveta x y z | !diamantes | !hierro | !oro | !ven <jugador> | !vuelve | !inventario | !stop');
       }
     });
+  }
+
+  // ---- Selección estilo WorldEdit: bloque que el jugador está mirando ----
+  function bloqueQueMira(username) {
+    const jugador = bot.players[username] && bot.players[username].entity;
+    if (!jugador) return null;
+    try {
+      const ojo = jugador.position.offset(0, 1.62, 0); // altura de los ojos
+      const dir = jugador.lookVector; // dirección de mirada normalizada
+      const hit = bot.world.raycast(ojo, dir, 8, (block) => block && !NO_MINABLES.has(block.name));
+      return hit ? hit.position : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function marcarPos(n, username) {
+    const pos = bloqueQueMira(username);
+    if (!pos) {
+      bot.chat(`No veo ningún bloque que estés mirando (${username})`);
+      return;
+    }
+    seleccion[n === 1 ? 'pos1' : 'pos2'] = pos;
+    bot.chat(`Pos${n} marcada: ${pos.x} ${pos.y} ${pos.z}`);
+  }
+
+  function mostrarSeleccion() {
+    const p1 = seleccion.pos1, p2 = seleccion.pos2;
+    if (!p1 && !p2) { bot.chat('Selección vacía. Usa !pos1 y !pos2 mirando los bloques'); return; }
+    bot.chat(`Pos1: ${p1 ? `${p1.x} ${p1.y} ${p1.z}` : '—'} | Pos2: ${p2 ? `${p2.x} ${p2.y} ${p2.z}` : '—'}`);
+  }
+
+  function minarSeleccion() {
+    const p1 = seleccion.pos1, p2 = seleccion.pos2;
+    if (!p1 || !p2) {
+      bot.chat('Necesitas marcar !pos1 y !pos2 primero');
+      return;
+    }
+    minarArea(p1.x, p1.y, p1.z, p2.x, p2.y, p2.z);
   }
 
   // Pausar/reanudar anti-AFK (no debe caminar mientras mina)
@@ -557,6 +609,7 @@ function reconectar() {
   if (seguirTimer) { clearInterval(seguirTimer); seguirTimer = null; }
   minando = false;
   siguiendoA = null;
+  seleccion = { pos1: null, pos2: null };
 
   // cerrar bot viejo si sigue vivo
   if (bot) {
