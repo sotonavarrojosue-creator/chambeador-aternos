@@ -12,7 +12,9 @@
 
 const mineflayer = require('mineflayer');
 const http = require('http');
-
+const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
+const collectBlock = require('mineflayer-collectblock');
+const Vec3 = require('vec3');
 const CONFIG = {
   host: 'sanfranblock.aternos.me',
   port: 38089,
@@ -29,6 +31,8 @@ let ultimoSpawn = 0;
 let antiAfkTimer = null;
 let watchdogTimer = null;
 let reconectando = false;
+let minando = false;        // true mientras el bot mina (pausa el anti-AFK)
+let minarVigiaTimer = null; // vigila la vida mientras mina
 
 // ---- Estado real de la conexión ----
 function conexionViva() {
@@ -75,13 +79,25 @@ function crearBot() {
     version: CONFIG.version,
   });
 
+  // Plugins: pathfinder (moverse) + collectblock (minar y recoger drops)
+  bot.loadPlugin(pathfinder);
+  bot.loadPlugin(collectBlock.plugin);
+
   bot.on('login', () => console.log(`[${hora()}] Login OK`));
   bot.on('spawn', () => {
     ultimoSpawn = Date.now();
     esperandoServerOffline = false;
     console.log(`[${hora()}] ✅ En el server. Bot activo (${bot.entity.position.x.toFixed(1)}, ${bot.entity.position.y.toFixed(1)}, ${bot.entity.position.z.toFixed(1)})`);
+    // configurar pathfinder con los movimientos del bot
+    try {
+      const mcData = require('minecraft-data')(bot.version);
+      bot.pathfinder.setMovements(new Movements(bot, mcData));
+    } catch (e) {
+      console.log(`[${hora()}] ⚠️ No se pudo configurar pathfinder: ${e.message}`);
+    }
     arrancarAntiAfk();
     arrancarWatchdog();
+    arrancarChat();
   });
 
   // ---- Anti-AFK: comportamiento humano aleatorio ----
@@ -111,6 +127,122 @@ function crearBot() {
         }
       } catch (e) { /* ignorar errores momentáneos */ }
     }, CONFIG.antiAfkIntervalo);
+  }
+
+  // ---- Comandos de chat: minería controlada por el usuario ----
+  function arrancarChat() {
+    bot.on('chat', (username, message) => {
+      if (username === bot.username) return; // ignorar mensajes propios
+      const args = message.trim().split(/\s+/);
+      const cmd = args[0].toLowerCase();
+
+      if (cmd === '!mina' && args.length >= 4) {
+        const [x, y, z] = args.slice(1, 4).map(Number);
+        if ([x, y, z].every(n => Number.isFinite(n))) minarBloque(x, y, z);
+        else bot.chat('Uso: !mina <x> <y> <z>');
+      } else if (cmd === '!minaarea' && args.length >= 7) {
+        const nums = args.slice(1, 7).map(Number);
+        if (nums.every(n => Number.isFinite(n))) minarArea(...nums);
+        else bot.chat('Uso: !minaarea <x1> <y1> <z1> <x2> <y2> <z2>');
+      } else if (cmd === '!stop') {
+        pararMinado();
+      } else if (cmd === '!ayuda' || cmd === '!help') {
+        bot.chat('Comandos: !mina x y z | !minaarea x1 y1 z1 x2 y2 z2 | !stop');
+      }
+    });
+  }
+
+  // Pausar/reanudar anti-AFK (no debe caminar mientras mina)
+  function pausarAntiAfk() {
+    if (antiAfkTimer) { clearInterval(antiAfkTimer); antiAfkTimer = null; }
+  }
+  function reanudarAntiAfk() {
+    if (!antiAfkTimer && conexionViva()) arrancarAntiAfk();
+  }
+
+  // Vigilar vida mientras mina: si baja de 3 corazones, parar
+  function vigilarVida() {
+    if (minarVigiaTimer) clearInterval(minarVigiaTimer);
+    minarVigiaTimer = setInterval(() => {
+      if (!minando) { clearInterval(minarVigiaTimer); minarVigiaTimer = null; return; }
+      if (bot.health < 6) {
+        try { bot.pathfinder.stop(); } catch (e) {}
+        bot.chat('Me estoy muriendo, paro de minar');
+        minando = false;
+        clearInterval(minarVigiaTimer); minarVigiaTimer = null;
+        reanudarAntiAfk();
+      }
+    }, 3000);
+  }
+
+  // Mina UN bloque en coordenadas
+  async function minarBloque(x, y, z) {
+    if (!conexionViva()) return;
+    if (minando) { bot.chat('Ya estoy minando, usa !stop primero'); return; }
+    minando = true;
+    pausarAntiAfk();
+    vigilarVida();
+    bot.chat(`Voy a minar ${x} ${y} ${z}`);
+    try {
+      const block = bot.blockAt(new Vec3(x, y, z));
+      if (!block || block.name === 'air') {
+        bot.chat('Ese bloque no existe o es aire');
+        minando = false; reanudarAntiAfk(); return;
+      }
+      // acercarse al bloque
+      await bot.pathfinder.goto(new goals.GoalNear(x, y, z, 2));
+      // minarlo y recoger el drop
+      await bot.collectBlock.collect([block]);
+      bot.chat(`Listo, miné ${block.name}`);
+    } catch (e) {
+      bot.chat(`No pude minar: ${(e.message || e).slice(0, 60)}`);
+    }
+    minando = false;
+    reanudarAntiAfk();
+  }
+
+  // Mina TODOS los bloques sólidos dentro de un cubo
+  async function minarArea(x1, y1, z1, x2, y2, z2) {
+    if (!conexionViva()) return;
+    if (minando) { bot.chat('Ya estoy minando, usa !stop primero'); return; }
+    minando = true;
+    pausarAntiAfk();
+    vigilarVida();
+    bot.chat(`Minando área ${x1},${y1},${z1} → ${x2},${y2},${z2}`);
+    try {
+      const area = {
+        x: [Math.min(x1, x2), Math.max(x1, x2)],
+        y: [Math.min(y1, y2), Math.max(y1, y2)],
+        z: [Math.min(z1, z2), Math.max(z1, z2)],
+      };
+      // bloques sólidos dentro del área (excluye aire, agua, lava, bedrock)
+      const bloques = bot.findBlocks({
+        matching: (b) => b && b.name !== 'air' && b.name !== 'water' && b.name !== 'lava' && b.name !== 'bedrock',
+        area,
+        maxDistance: 256,
+        count: 10000,
+      }).map(pos => bot.blockAt(pos));
+      if (bloques.length === 0) {
+        bot.chat('No hay bloques minables en esa área');
+        minando = false; reanudarAntiAfk(); return;
+      }
+      bot.chat(`Encontré ${bloques.length} bloques, empiezo...`);
+      await bot.collectBlock.collect(bloques);
+      bot.chat('Área minada. Listo!');
+    } catch (e) {
+      bot.chat(`Minado interrumpido: ${(e.message || e).slice(0, 60)}`);
+    }
+    minando = false;
+    reanudarAntiAfk();
+  }
+
+  function pararMinado() {
+    if (!minando) { bot.chat('No estoy minando'); return; }
+    try { bot.pathfinder.stop(); } catch (e) {}
+    minando = false;
+    if (minarVigiaTimer) { clearInterval(minarVigiaTimer); minarVigiaTimer = null; }
+    reanudarAntiAfk();
+    bot.chat('Parado.');
   }
 
   // ---- Watchdog: detecta conexiones muertas silenciosamente ----
@@ -147,6 +279,8 @@ function reconectar() {
   // limpiar timers
   if (antiAfkTimer) { clearInterval(antiAfkTimer); antiAfkTimer = null; }
   if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; }
+  if (minarVigiaTimer) { clearInterval(minarVigiaTimer); minarVigiaTimer = null; }
+  minando = false;
 
   // cerrar bot viejo si sigue vivo
   if (bot) {
