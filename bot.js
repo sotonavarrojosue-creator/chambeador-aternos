@@ -17,6 +17,7 @@ const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
 const collectBlock = require('mineflayer-collectblock');
 const toolPlugin = require('mineflayer-tool');
 const Vec3 = require('vec3');
+const mc = require('minecraft-protocol'); // ping ligero antes de conectar (anti rate-limit Aternos)
 
 const CONFIG = {
   host: 'sanfranblock.aternos.me',
@@ -90,6 +91,25 @@ server.listen(HTTP_PORT, () => {
 function crearBot() {
   if (reconectando) return;
   console.log(`[${hora()}] Conectando como ${CONFIG.username} a ${CONFIG.host}:${CONFIG.port}...`);
+
+  // Gate anti rate-limit (Aternos): Aternos duerme el server sin jugadores y lo
+  // despierta con cualquier conexión. Pero N conexiones completas seguidas desde
+  // la misma IP (p. ej. IPs de datacenter como Render, muy reportadas por abuso)
+  // disparan un rate-limit/bloqueo temporal de Aternos. Estrategia: primero un
+  // ping ligero; si el server no responde, esperar 5 min (el ping también lo
+  // despierta). Solo se abre conexión completa cuando el server responde.
+  mc.ping({ host: CONFIG.host, port: CONFIG.port, version: CONFIG.version }, (err) => {
+    if (err) {
+      esperandoServerOffline = true;
+      console.log(`[${hora()}] ⚠️ Server dormido (ping: ${err.code || err.message}). Reintento en 5 min (el ping lo despierta)`);
+      setTimeout(() => { reconectando = false; crearBot(); }, 300000);
+      return;
+    }
+    crearBotReal();
+  });
+}
+
+function crearBotReal() {
 
   bot = mineflayer.createBot({
     host: CONFIG.host,
@@ -960,7 +980,7 @@ function reconectar() {
     bot = null;
   }
 
-  const delay = esperandoServerOffline ? 60000 : 5000;
+  const delay = esperandoServerOffline ? 30000 : 5000;
   console.log(`[${hora()}] Reintentando en ${delay / 1000}s...${esperandoServerOffline ? ' (server apagado — Aternos lo enciende al conectar)' : ''}`);
   setTimeout(() => {
     reconectando = false;
