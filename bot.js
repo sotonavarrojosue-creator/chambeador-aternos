@@ -24,7 +24,8 @@ const CONFIG = {
   port: 38089,
   username: 'Chambeador',
   auth: 'offline',          // server cracked (sin premium/login)
-  version: '1.21.11',       // última soportada por mineflayer (ViaVersion traduce)
+  version: '1.21.1',        // Paper 26.2 = protocol 776 = 1.21.1 (ViaVersion traduce)
+  checkTimeoutInterval: 300000, // 5 min (default 30s) — evita desconexión por lag Aternos
   antiAfkIntervalo: 25000,  // ms entre "actividades"
   watchdogIntervalo: 20000, // ms entre chequeos de conexión real
   alcanceDig: 4.5,          // distancia de dig en Minecraft
@@ -98,13 +99,21 @@ function crearBot() {
   // disparan un rate-limit/bloqueo temporal de Aternos. Estrategia: primero un
   // ping ligero; si el server no responde, esperar 5 min (el ping también lo
   // despierta). Solo se abre conexión completa cuando el server responde.
+  const pingTimeout = setTimeout(() => {
+    console.log(`[${hora()}] ⚠️ Ping timeout (5s). Server no responde. Reintento en 5 min`);
+    esperandoServerOffline = true;
+    setTimeout(() => { reconectando = false; crearBot(); }, 300000);
+  }, 5000);
+
   mc.ping({ host: CONFIG.host, port: CONFIG.port, version: CONFIG.version }, (err) => {
+    clearTimeout(pingTimeout);
     if (err) {
       esperandoServerOffline = true;
       console.log(`[${hora()}] ⚠️ Server dormido (ping: ${err.code || err.message}). Reintento en 5 min (el ping lo despierta)`);
       setTimeout(() => { reconectando = false; crearBot(); }, 300000);
       return;
     }
+    console.log(`[${hora()}] ✅ Ping OK — server responde, conectando...`);
     crearBotReal();
   });
 }
@@ -117,6 +126,7 @@ function crearBotReal() {
     username: CONFIG.username,
     auth: CONFIG.auth,
     version: CONFIG.version,
+    checkTimeoutInterval: CONFIG.checkTimeoutInterval,
   });
 
   // Plugins: pathfinder (moverse) + collectblock (minar/recoger) + tool (mejor pico)
