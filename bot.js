@@ -81,7 +81,19 @@ const DIAG = {
   pingsFail: 0,
   ultimoIntento: null,
   estado: 'iniciando',
+  ipPublica: null,       // IP pública del host (para debug de bloqueos)
 };
+
+// Reportar IP pública del host (útil para debug de bloqueos Aternos)
+try {
+  const req = http.get('http://api.ipify.org', (r) => {
+    let d = '';
+    r.on('data', c => d += c);
+    r.on('end', () => { DIAG.ipPublica = d.trim(); });
+  });
+  req.setTimeout(5000, () => req.destroy());
+  req.on('error', () => {});
+} catch (e) {}
 
 // ---- Servidor HTTP: requerido por Render y para keep-alive (UptimeRobot) ----
 const server = http.createServer((req, res) => {
