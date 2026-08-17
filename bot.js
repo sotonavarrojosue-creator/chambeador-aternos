@@ -72,6 +72,17 @@ function conexionViva() {
   }
 }
 
+// ---- Diagnóstico (para debug remoto sin logs) ----
+const DIAG = {
+  ultimoPing: null,      // {ok, error, hora}
+  ultimoError: null,     // {msg, code, hora}
+  intentos: 0,           // intentos de conexión totales
+  pingsOk: 0,
+  pingsFail: 0,
+  ultimoIntento: null,
+  estado: 'iniciando',
+};
+
 // ---- Servidor HTTP: requerido por Render y para keep-alive (UptimeRobot) ----
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -82,6 +93,7 @@ const server = http.createServer((req, res) => {
     spawnHace: ultimoSpawn ? Math.round((Date.now() - ultimoSpawn) / 1000) + 's' : 'nunca',
     minando,
     server: `${CONFIG.host}:${CONFIG.port}`,
+    diag: DIAG,
   }));
 });
 const HTTP_PORT = process.env.PORT || 3000;
@@ -102,17 +114,26 @@ function crearBot() {
   const pingTimeout = setTimeout(() => {
     console.log(`[${hora()}] ⚠️ Ping timeout (5s). Server no responde. Reintento en 5 min`);
     esperandoServerOffline = true;
+    DIAG.ultimoPing = { ok: false, error: 'timeout 5s', hora: hora() };
+    DIAG.pingsFail++;
     setTimeout(() => { reconectando = false; crearBot(); }, 300000);
   }, 5000);
 
   mc.ping({ host: CONFIG.host, port: CONFIG.port, version: CONFIG.version }, (err) => {
     clearTimeout(pingTimeout);
+    DIAG.ultimoIntento = hora();
+    DIAG.intentos++;
     if (err) {
       esperandoServerOffline = true;
+      DIAG.ultimoPing = { ok: false, error: err.code || err.message, hora: hora() };
+      DIAG.pingsFail++;
       console.log(`[${hora()}] ⚠️ Server dormido (ping: ${err.code || err.message}). Reintento en 5 min (el ping lo despierta)`);
       setTimeout(() => { reconectando = false; crearBot(); }, 300000);
       return;
     }
+    DIAG.ultimoPing = { ok: true, hora: hora() };
+    DIAG.pingsOk++;
+    DIAG.estado = 'ping ok — conectando';
     console.log(`[${hora()}] ✅ Ping OK — server responde, conectando...`);
     crearBotReal();
   });
@@ -966,6 +987,7 @@ function crearBotReal() {
   });
   bot.on('error', (err) => {
     console.log(`[${hora()}] ⚠️ Error: ${err.message}`);
+    DIAG.ultimoError = { msg: err.message, code: err.code || null, hora: hora() };
     // "ECONNREFUSED" = server apagado (típico de Aternos)
     if (err.code === 'ECONNREFUSED' || err.code === 'ECONNRESET') esperandoServerOffline = true;
   });
